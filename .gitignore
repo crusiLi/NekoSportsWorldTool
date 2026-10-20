@@ -12,7 +12,8 @@ nekosportsworldtool.log*
 /rank_result.json
 /.idea/
 docs/_preview.png
-/docs
+/docs/*
+!/docs/free-run.md
 /fixtures
 /ai_sports.json
 /obs_*.json
