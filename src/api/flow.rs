@@ -107,7 +107,7 @@ pub fn run_full_flow(
         route_pts.extend(crate::track::generate_road::radial_order(&free));
     }
     if params.run_mode.is_free() {
-        log("[track] 使用本地自由环线，无必经点或校园围栏约束");
+        log(if params.route_mode == RouteMode::Road { "[track] 自由跑路网路线，无必经点或校园围栏约束" } else { "[track] 使用本地自由环线，无必经点或校园围栏约束" });
     } else if !pol.must_points.is_empty() {
         log(&format!(
             "√ [policy] 必经点 {} 个（保持顺序），合并后路线 waypoint 共 {} 个",
@@ -177,7 +177,19 @@ pub fn run_full_flow(
     // 随机 0-4 秒偏移（终端上报的 flag 与首点差 <5s），轨迹/提交/OBS/五点统一使用
     let start_ms = params.start_ms + (rand::random::<i64>() % 5) * 1000;
     let mut track = if params.run_mode.is_free() {
-        crate::track::free::build(params.dist, params.dur, params.seed, start_ms, anchor)?
+        match params.route_mode {
+            RouteMode::Legacy => crate::track::free::build(params.dist, params.dur, params.seed, start_ms, anchor)?,
+            RouteMode::Road => {
+                let cfg = crate::api::model::load_config();
+                if cfg.osm_path.trim().is_empty() {
+                    return Err("自由跑沿道路模式需要先在「路网」页导入 OSM 文件".into());
+                }
+                let net = crate::track::generate_road::load_network_path(&cfg.osm_path)?;
+                let track = crate::track::free::build_road(&net, anchor, params.dist, params.dur, params.seed, start_ms)?;
+                log(&format!("√ [track] 自由跑沿道路路线：目标 {:.0}m，实际 {:.0}m", params.dist, track.totalDistance));
+                track
+            }
+        }
     } else {
         match params.route_mode {
             RouteMode::Road => {
