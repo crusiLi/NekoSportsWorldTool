@@ -172,6 +172,10 @@ impl App {
     pub fn load_osm_async(&mut self, path: String) {
         self.osm_page.path = path.clone();
         self.osm_page.busy = true;
+        self.network = None;
+        self.run_page.preview = None;
+        self.run_page.preview_stale = true;
+        self.run_page.map_fitted = false;
         self.osm_page.status = format!("加载中：{path} …");
         self.config.osm_path = path.clone();
         let _ = crate::api::model::save_config(&self.config);

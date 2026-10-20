@@ -94,6 +94,9 @@ impl App {
                     self.log
                         .push(&format!("[osm] 路网加载成功：{nodes} 节点 / {bld} 建筑"));
                     self.network = Some(net);
+                    self.run_page.preview = None;
+                    self.run_page.preview_stale = true;
+                    self.run_page.map_fitted = false;
                 }
                 Err(e) => {
                     self.osm_page.status = format!("路网加载失败：{e}");

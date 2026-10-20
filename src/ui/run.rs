@@ -293,7 +293,7 @@ impl App {
             if let Err(e) = crate::api::model::save_config(&self.config) { self.status = e; }
         }
         if self.run_page.run_mode.is_free() {
-            ui.label("无必经打卡点；围绕设备页设置的位置生成自由环线。");
+            ui.label("无必经打卡点；支持自由环线或沿导入的真实道路规划。");
         }
         {
             let page = &mut self.run_page;
@@ -417,16 +417,24 @@ impl App {
                 ui.label("人脸校验标记：");
                 ui.checkbox(&mut page.face_check, "faceCheck=1");
             });
-            if !page.run_mode.is_free() {
+            {
                 ui.horizontal(|ui| {
                     ui.label("路线算法：");
-                    ui.selectable_value(&mut page.route_mode, RouteMode::Legacy, "经典打卡点环");
-                    ui.selectable_value(&mut page.route_mode, RouteMode::Road, "真实道路路由");
+                    ui.selectable_value(&mut page.route_mode, RouteMode::Legacy, if page.run_mode.is_free() { "自由环线" } else { "经典打卡点环" });
+                    ui.selectable_value(&mut page.route_mode, RouteMode::Road, if page.run_mode.is_free() { "沿真实道路" } else { "真实道路路由" });
                     if page.route_mode == RouteMode::Road && self.network.is_none() {
                         ui.colored_label(theme::warn(), "（需先在「路网」页导入 OSM）");
                     }
                 });
             }
+        }
+
+        if prev_route != self.run_page.route_mode {
+            self.run_page.preview = None;
+            self.run_page.preview_stale = true;
+            self.run_page.map_fitted = false;
+            self.config.route_mode = if self.run_page.route_mode == RouteMode::Road { "road" } else { "legacy" }.into();
+            if let Err(e) = crate::api::model::save_config(&self.config) { self.status = e; }
         }
 
         // 切换到真实道路路由时按需拉取电子围栏与实时点位（经典模式不触发这些端点）。
@@ -474,7 +482,9 @@ impl App {
         self.draw_run_map(ui);
 
         ui.add_space(8.0);
-        let enabled = !self.run_busy && self.session.is_some();
+        let road_ready = !self.run_page.run_mode.is_free() || self.run_page.route_mode != RouteMode::Road
+            || (!self.osm_page.busy && self.network.is_some() && self.run_page.preview.is_some() && !self.run_page.preview_stale);
+        let enabled = !self.run_busy && self.session.is_some() && road_ready;
         let btn = if self.run_busy {
             theme::primary_btn("提交中…")
         } else {
@@ -484,9 +494,8 @@ impl App {
             if ui.add_enabled(enabled, btn).clicked() {
                 self.start_run();
             }
-            if self.session.is_none() {
-                ui.label("（请先登录）");
-            }
+            if self.session.is_none() { ui.label("（请先登录）"); }
+            if !road_ready { ui.colored_label(theme::warn(), "（沿道路模式需要成功生成路线预览）"); }
         });
     }
 
@@ -550,13 +559,20 @@ impl App {
                 self.run_page.map_fitted = false;
                 self.run_page.preview_stale = false;
                 if let Some(plan) = self.run_page.plan.as_ref() {
-                    match crate::track::free::build(plan.dist * 1000.0, plan.dur, plan.seed, plan.start_ms, anchor) {
-                        Ok(track) => self.run_page.preview = Some(crate::track::generate_road::RoadPlan {
-                            route: track.locations.iter().filter(|p| p.ptype != -1).map(|p| (p.gLat, p.gLng)).collect(),
-                            length_m: track.totalDistance,
-                            edges: Vec::new(), buildings: Vec::new(), checkpoints: Vec::new(), fences: Vec::new(),
-                        }),
-                        Err(e) => { self.status = format!("自由跑预览失败：{e}"); }
+                    let preview = if self.run_page.route_mode == RouteMode::Road {
+                        self.network.as_ref().ok_or_else(|| "请先到「路网」页导入覆盖当前位置的 OSM 文件".to_string())
+                            .and_then(|net| crate::track::free::road_preview(net, anchor, plan.dist * 1000.0, plan.seed))
+                    } else {
+                        crate::track::free::build(plan.dist * 1000.0, plan.dur, plan.seed, plan.start_ms, anchor)
+                            .map(|track| crate::track::generate_road::RoadPlan {
+                                route: track.locations.iter().filter(|p| p.ptype != -1).map(|p| (p.gLat, p.gLng)).collect(),
+                                length_m: track.totalDistance,
+                                edges: Vec::new(), buildings: Vec::new(), checkpoints: Vec::new(), fences: Vec::new(),
+                            })
+                    };
+                    match preview {
+                        Ok(preview) => self.run_page.preview = Some(preview),
+                        Err(e) => { self.status = format!("自由跑预览失败：{e}"); ui.colored_label(theme::warn(), e); }
                     }
                 }
             }
@@ -702,7 +718,7 @@ impl App {
                 );
             }
             let label = if free {
-                format!("自由跑 {:.2} km · 无必经打卡点", plan.dist)
+                format!("自由跑 · {} · 目标 {:.2} km / 路线 {:.2} km · 无必经点", if self.run_page.route_mode == RouteMode::Road { "沿道路" } else { "自由环线" }, plan.dist, p.length_m / 1000.0)
             } else if p.length_m > 0.0 {
                 let loops = plan.dist * 1000.0 / p.length_m;
                 if loops > 1.15 {
