@@ -40,6 +40,21 @@ fn gz_str(v: &str) -> String {
     gz(v.as_bytes())
 }
 
+/// Free-run OBS uses an empty point array, matching its submission body.
+pub fn build_run_obs_object(
+    track: &Track, rrid: i64, uuid: &str, uid: i64,
+    points: &[Value], mode: crate::api::run_mode::RunMode,
+) -> Result<Value, String> {
+    if mode.is_free() && !points.is_empty() {
+        return Err("自由跑 OBS 不应携带必经打卡点".into());
+    }
+    let mut object = build_obs_object(track, rrid, uuid, uid, points);
+    if mode.is_free() {
+        object["fixed_point_json"] = Value::String(gz_json(&json!([])));
+    }
+    Ok(object)
+}
+
 /// 27 键协议点集（gen 点 → OBS 点；gLat/gLng 由 BD 转 GCJ）。
 pub fn conv_point(p: &GenPoint, start_ms: i64) -> Value {
     let (glat, glng) = bd09_to_gcj02(p.gLat, p.gLng);
