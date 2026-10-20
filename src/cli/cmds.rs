@@ -86,10 +86,6 @@ fn cmd_run(rest: &[&str]) -> i32 {
         Ok(mode) => mode,
         Err(e) => { eprintln!("{e}"); return 1; }
     };
-    if run_mode.is_free() && get(&flags, "route") == Some("road") {
-        eprintln!("自由跑当前使用自由环线，请省略 --route road");
-        return 1;
-    }
     let mut client = match make_client() {
         Ok(c) => c,
         Err(e) => {
