@@ -2,7 +2,7 @@
 
 # NekoSportsWorldTool
 
-本地 Windows 自由跑增量版：新增无必经打卡点模式。源码、验证边界及 Windows 构建方法见 [自由跑说明](docs/free-run.md)。Windows x64 云端编译与 105 项测试已通过；Windows 界面操作及服务端验收尚未完成。
+本地 Windows 自由跑增量版：新增无必经打卡点模式，支持自由环线或沿 OSM 真实道路路线。源码、验证边界及 Windows 构建方法见 [自由跑说明](docs/free-run.md)。Windows x64 云端编译与 105 项测试已通过；Windows 界面操作及服务端验收尚未完成。
 
 ![Release](https://img.shields.io/github/v/release/YanamiNeko/NekoSportsWorldTool)
 ![Build](https://github.com/YanamiNeko/NekoSportsWorldTool/actions/workflows/release.yml/badge.svg)
