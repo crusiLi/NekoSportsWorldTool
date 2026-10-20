@@ -1,0 +1,26 @@
+name: Windows Free Run Build
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: free-run
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - name: Test and package Windows GUI
+        shell: pwsh
+        run: ./windows/build.ps1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: NekoSportsWorldTool-free-run-win-x64
+          path: dist/NekoSportsWorldTool-free-run-win-x64.zip
+          if-no-files-found: error
