@@ -82,6 +82,14 @@ fn cmd_logout() -> i32 {
 
 fn cmd_run(rest: &[&str]) -> i32 {
     let flags = parse_flags(rest);
+    let run_mode = match crate::api::run_mode::RunMode::parse(get(&flags, "mode").unwrap_or("campus")) {
+        Ok(mode) => mode,
+        Err(e) => { eprintln!("{e}"); return 1; }
+    };
+    if run_mode.is_free() && get(&flags, "route") == Some("road") {
+        eprintln!("自由跑当前使用自由环线，请省略 --route road");
+        return 1;
+    }
     let mut client = match make_client() {
         Ok(c) => c,
         Err(e) => {
@@ -169,6 +177,7 @@ fn cmd_run(rest: &[&str]) -> i32 {
 
     let mut log = logger();
     let params = crate::api::flow::RunParams {
+        run_mode,
         dist,
         dur,
         start_ms,
@@ -185,8 +194,9 @@ fn cmd_run(rest: &[&str]) -> i32 {
                 out.result.rrid,
                 out.result.uuid,
                 out.obs_ok,
-                if out.detail_ok { "通过" } else { "未通过" }
+                if out.detail_ok { "已获取" } else { "未获取" }
             );
+            println!("服务端达标状态={:?}，模式匹配={:?}（None 表示尚未核验）", out.complete, out.mode_matches);
             0
         }
         Err(e) => {
