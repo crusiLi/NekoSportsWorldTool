@@ -43,8 +43,8 @@ fn extract_must_points(v: &serde_json::Value) -> Vec<(f64, f64)> {
     Vec::new()
 }
 
-/// body：{"runMode":1,"ruleUpdateTime":0,"geoFenceUpdateTime":0,"selectUnid":<unid>,"operateType":0}
-pub fn fetch_policy(client: &mut ApiClient) -> Result<PolicyInfo, String> {
+/// 按所选模式请求规则；请求失败时不回退到另一种业务模式。
+pub fn fetch_policy(client: &mut ApiClient, mode: super::run_mode::RunMode) -> Result<PolicyInfo, String> {
     let unid = client
         .login
         .as_ref()
@@ -52,7 +52,7 @@ pub fn fetch_policy(client: &mut ApiClient) -> Result<PolicyInfo, String> {
         .unwrap_or_default();
     let select_unid = unid.parse::<i64>().unwrap_or(0);
     let body = json!({
-        "runMode": 1,
+        "runMode": mode.sport_type(),
         "ruleUpdateTime": 0,
         "geoFenceUpdateTime": 0,
         "selectUnid": select_unid,
@@ -75,7 +75,7 @@ pub fn fetch_policy(client: &mut ApiClient) -> Result<PolicyInfo, String> {
         min_distance: rule
             .get("minDistance")
             .and_then(|t| t.as_i64())
-            .unwrap_or(1000),
+            .unwrap_or(if mode.is_free() { 0 } else { 1000 }),
         valid_time: rule.get("validTime").and_then(|t| t.as_i64()).unwrap_or(0),
         must_points: extract_must_points(&biz),
     })

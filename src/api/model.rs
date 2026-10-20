@@ -46,6 +46,8 @@ impl Session {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Config {
     #[serde(default)]
+    pub run_mode: super::run_mode::RunMode,
+    #[serde(default)]
     pub username: String,
     #[serde(default)]
     pub password: String,
@@ -108,6 +110,7 @@ fn default_update_check() -> String {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            run_mode: super::run_mode::RunMode::default(),
             username: String::new(),
             password: String::new(),
             remember: false,

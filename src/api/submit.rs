@@ -77,6 +77,7 @@ pub fn total_ascent(locs: &[GenPoint]) -> f64 {
 }
 
 pub struct SubmitParams {
+    pub run_mode: super::run_mode::RunMode,
     pub track: Track,
     pub uid: i64,
     pub selected_unid: i64,
@@ -104,12 +105,17 @@ pub struct SubmitResult {
     pub sel_distance: i64,
 }
 
-/// 提交跑步记录（sportType=1 自由跑 + 实时五点）。
-pub fn submit_record(client: &mut ApiClient, p: &SubmitParams, log: &mut dyn FnMut(&str)) -> Result<SubmitResult, String> {
+/// 构造和签名报文，无网络副作用。
+fn prepare_record(p: &SubmitParams, run_uuid: String) -> Result<(Value, SubmitResult), String> {
     let track = &p.track;
     let start_coordinate = track.validate_consistency()?;
-    if p.five_point_json.is_empty() { return Err("五点轨迹不能为空".into()); }
-    validate_five_point_wrapper(&p.five_point_json)?;
+    if p.run_mode.is_free() {
+        let points: Value = serde_json::from_str(&p.five_point_json)
+            .map_err(|e| format!("自由跑点位数据无效: {e}"))?;
+        if points != json!([]) { return Err("自由跑不应携带必经打卡点".into()); }
+    } else {
+        validate_five_point_wrapper(&p.five_point_json)?;
+    }
     let total_time = track.totalTime;
     let total_dis = track.totalDistance;
     let total_steps = track.totalSteps;
@@ -119,7 +125,6 @@ pub fn submit_record(client: &mut ApiClient, p: &SubmitParams, log: &mut dyn FnM
     let power = avg_power(p.weight, total_dis, total_time);
     let kcal = official_kcal(p.weight, total_time, total_dis);
 
-    let run_uuid = uuid::Uuid::new_v4().to_string().to_uppercase();
     let unid = p.selected_unid;
 
     let dis_ceil = (total_dis * 100.0).ceil() / 100.0;
@@ -128,7 +133,7 @@ pub fn submit_record(client: &mut ApiClient, p: &SubmitParams, log: &mut dyn FnM
 
     let mut body = Map::new();
     body.insert("allLocJson".into(), Value::String(String::new()));
-    body.insert("sportType".into(), Value::from(1));
+    body.insert("sportType".into(), Value::from(p.run_mode.sport_type()));
     body.insert("policy".into(), Value::from(p.policy));
     body.insert("totalTime".into(), Value::from(total_time));
     body.insert("startTime".into(), Value::from(start_ms));
@@ -177,8 +182,20 @@ pub fn submit_record(client: &mut ApiClient, p: &SubmitParams, log: &mut dyn FnM
     let orig = original_sign(&body_val, false);
     body.insert("signature".into(), Value::String(sig));
     body.insert("originalSign".into(), Value::String(orig));
-    let body_plain = Value::Object(body).to_string();
+    let result = SubmitResult {
+        rrid: 0, uuid: run_uuid, start_ms, complete: None,
+        total_dis, total_time, total_steps, avg_step_freq,
+        calorie: kcal, avg_power: power, sel_distance: p.min_distance,
+    };
+    Ok((Value::Object(body), result))
+}
 
+/// 提交已按业务模式构造的记录。
+pub fn submit_record(client: &mut ApiClient, p: &SubmitParams, log: &mut dyn FnMut(&str)) -> Result<SubmitResult, String> {
+    let run_uuid = uuid::Uuid::new_v4().to_string().to_uppercase();
+    let (body, mut result) = prepare_record(p, run_uuid.clone())?;
+    let body_plain = body.to_string();
+    let start_ms = result.start_ms;
     let device_id = if client.identity.device_id.is_empty() {
         uuid::Uuid::new_v4().to_string().to_uppercase()
     } else {
@@ -212,7 +229,7 @@ pub fn submit_record(client: &mut ApiClient, p: &SubmitParams, log: &mut dyn FnM
     let resp = req.send_string(&body_env.json).map_err(ureq_err)?;
     let status = resp.status();
     let raw = resp.into_string().unwrap_or_default();
-    log(&format!("[record] sportType=1 HTTP {status} len={}", raw.len()));
+    log(&format!("[record] {} HTTP {status} len={}", p.run_mode.label(), raw.len()));
 
     let key = derive_paes_key(
         &body_env.key_data[0], &body_env.key_data[1], &body_env.key_data[2], &body_env.key_data[3],
@@ -225,19 +242,9 @@ pub fn submit_record(client: &mut ApiClient, p: &SubmitParams, log: &mut dyn FnM
         return Err(format!("提交未返回 rrid: {}", truncate_json(&biz)));
     }
     log(&format!("√ 提交成功 rrid={rrid} uuid={run_uuid}"));
-    Ok(SubmitResult {
-        rrid,
-        uuid: run_uuid,
-        start_ms,
-        complete: super::client::get_field(&biz, "complete").and_then(|v| v.as_bool()),
-        total_dis,
-        total_time,
-        total_steps,
-        avg_step_freq,
-        calorie: kcal,
-        avg_power: power,
-        sel_distance: p.min_distance,
-    })
+    result.rrid = rrid;
+    result.complete = super::client::get_field(&biz, "complete").and_then(|v| v.as_bool());
+    Ok(result)
 }
 
 fn client_token(client: &ApiClient) -> String {
@@ -247,4 +254,62 @@ fn client_token(client: &ApiClient) -> String {
 fn truncate_json(v: &Value) -> String {
     let s = v.to_string();
     s.chars().take(240).collect()
+}
+
+#[cfg(test)]
+mod mode_tests {
+    use super::*;
+    use crate::api::run_mode::RunMode;
+
+    fn params(mode: RunMode) -> SubmitParams {
+        SubmitParams {
+            run_mode: mode,
+            track: crate::track::free::build(2000.0, 800, 42, 1_700_000_000_000,
+                crate::location::Coordinate::new(39.9, 116.4, 0.0).unwrap()).unwrap(),
+            uid: 123, selected_unid: 456, policy: 1, policy_ts: 1_700_000_000_000,
+            min_distance: 1000, weight: 68.0, face_check: 0,
+            five_point_json: "[]".into(), address: "北京市".into(),
+        }
+    }
+
+    #[test]
+    fn free_mode_is_in_both_signature_inputs_and_the_actual_body() {
+        let p = params(RunMode::Free);
+        let (body, _) = prepare_record(&p, "FIXED-TEST-UUID".into()).unwrap();
+        assert_eq!(body["sportType"], 4);
+        assert_eq!(body["fivePointJson"], "[]");
+        assert!(body["originalSign"].as_str().unwrap().contains("sportType=4&"));
+        assert_eq!(body["signature"].as_str().unwrap(), signature(&body, false));
+        let mut wrong_mode = body.clone();
+        wrong_mode["sportType"] = json!(1);
+        assert_ne!(signature(&wrong_mode, false), body["signature"].as_str().unwrap());
+    }
+
+    #[test]
+    fn campus_still_requires_real_points_and_free_rejects_them() {
+        let mut p = params(RunMode::Campus);
+        assert!(prepare_record(&p, "TEST".into()).is_err());
+        let points = vec![json!({"lat":39.9,"lon":116.4,"glat":39.894,"glon":116.3935})];
+        p.five_point_json = crate::track::wire::five_point_wrapper(&points, p.track.startTime);
+        let (body, _) = prepare_record(&p, "TEST".into()).unwrap();
+        assert_eq!(body["sportType"], 1);
+        p.run_mode = RunMode::Free;
+        assert!(prepare_record(&p, "TEST".into()).is_err());
+    }
+
+    #[test]
+    fn free_obs_has_no_fabricated_checkpoints() {
+        use std::io::Read;
+        use base64::Engine;
+        let p = params(RunMode::Free);
+        let object = crate::track::wire::build_run_obs_object(
+            &p.track, 123, "TEST", 456, &[], RunMode::Free).unwrap();
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(object["fixed_point_json"].as_str().unwrap()).unwrap();
+        let mut decoded = String::new();
+        flate2::read::GzDecoder::new(bytes.as_slice()).read_to_string(&mut decoded).unwrap();
+        assert_eq!(serde_json::from_str::<Value>(&decoded).unwrap(), json!([]));
+        assert!(crate::track::wire::build_run_obs_object(
+            &p.track, 123, "TEST", 456, &[json!({})], RunMode::Free).is_err());
+    }
 }
