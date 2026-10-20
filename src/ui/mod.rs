@@ -346,6 +346,8 @@ impl App {
             ai_confirm: None,
             tab: 0,
             run_page: run::RunPage {
+                run_mode: config.run_mode,
+                preview_anchor: None,
                 dist_min: config.dist_min,
                 dist_max: config.dist_max,
                 pace_min: config.pace_min,

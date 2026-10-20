@@ -367,6 +367,9 @@ fn run_popup(v: &serde_json::Value) -> PopupInfo {
         0.0
     };
     let mut lines = vec![
+        format!("模式：{}", v["mode"].as_str().unwrap_or("校园跑")),
+        format!("服务端达标：{}", match v["complete"].as_bool() { Some(true) => "达标", Some(false) => "未达标", None => "尚未核验" }),
+        format!("记录模式：{}", match v["mode_matches"].as_bool() { Some(true) => "与所选模式一致", Some(false) => "与所选模式不一致，请查看详情", None => "尚未核验" }),
         format!("记录号：{}", v["rrid"].as_i64().unwrap_or(0)),
         format!("UUID：{}", v["uuid"].as_str().unwrap_or("")),
         format!(
@@ -392,12 +395,12 @@ fn run_popup(v: &serde_json::Value) -> PopupInfo {
         ),
         format!("开始时间：{}", fmt_hms(v["start"].as_i64().unwrap_or(0))),
         format!(
-            "OBS 上传：{}/2 · 详情验证：{}",
+            "OBS 上传：{}/2 · 详情查询：{}",
             v["obs_ok"].as_i64().unwrap_or(0),
             if v["verify"].as_bool().unwrap_or(false) {
-                "通过"
+                "已获取"
             } else {
-                "未通过"
+                "未获取"
             }
         ),
     ];

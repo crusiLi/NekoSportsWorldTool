@@ -1,4 +1,4 @@
-//! 跑步页：恒 sportType=1；距离/配速范围 + 开始时间（随机或指定，最多前 3 天）。
+//! 跑步页：校园跑 / 无必经点自由跑；距离/配速范围 + 开始时间（随机或指定，最多前 3 天）。
 //!
 //! 开始时间：「日期」下拉（今天 / 1-3 天前）两种模式共用；随机模式在该日 7:00-20:00
 //! 内抽样，并保证「开始 + 用时」不越过当前时刻；指定模式完全按用户填写的时/分
@@ -63,6 +63,8 @@ fn days_ago_label(days_ago: i64) -> String {
 
 #[derive(Default)]
 pub struct RunPage {
+    pub run_mode: crate::api::run_mode::RunMode,
+    pub preview_anchor: Option<(f64, f64)>,
     pub dist_min: f32,
     pub dist_max: f32,
     pub pace_min: f32,
@@ -112,6 +114,17 @@ pub struct RunPlan {
 }
 
 impl RunPage {
+    /// Switching business modes must discard the other mode's cached map.
+    pub fn select_mode(&mut self, mode: crate::api::run_mode::RunMode) -> bool {
+        if self.run_mode == mode { return false; }
+        self.run_mode = mode;
+        self.preview = None;
+        self.preview_stale = true;
+        self.map_fitted = false;
+        self.preview_anchor = None;
+        true
+    }
+
     /// 距离/配速是否与方案一致（不一致需重掷运动参数）。
     fn shape_matches(&self, p: &RunPlan) -> bool {
         p.dist_min == self.dist_min
@@ -268,6 +281,20 @@ impl App {
 
     fn draw_run_content(&mut self, ui: &mut egui::Ui) {
         let prev_route = self.run_page.route_mode;
+        let prev_mode = self.run_page.run_mode;
+        let mut selected_mode = prev_mode;
+        ui.horizontal(|ui| {
+            ui.label("跑步模式：");
+            ui.selectable_value(&mut selected_mode, crate::api::run_mode::RunMode::Campus, "校园跑");
+            ui.selectable_value(&mut selected_mode, crate::api::run_mode::RunMode::Free, "自由跑");
+        });
+        if self.run_page.select_mode(selected_mode) {
+            self.config.run_mode = self.run_page.run_mode;
+            if let Err(e) = crate::api::model::save_config(&self.config) { self.status = e; }
+        }
+        if self.run_page.run_mode.is_free() {
+            ui.label("无必经打卡点；围绕设备页设置的位置生成自由环线。");
+        }
         {
             let page = &mut self.run_page;
             let compact = mobile::compact_ui(ui);
@@ -390,18 +417,21 @@ impl App {
                 ui.label("人脸校验标记：");
                 ui.checkbox(&mut page.face_check, "faceCheck=1");
             });
-            ui.horizontal(|ui| {
-                ui.label("路线算法：");
-                ui.selectable_value(&mut page.route_mode, RouteMode::Legacy, "经典打卡点环");
-                ui.selectable_value(&mut page.route_mode, RouteMode::Road, "真实道路路由");
-                if page.route_mode == RouteMode::Road && self.network.is_none() {
-                    ui.colored_label(theme::warn(), "（需先在「路网」页导入 OSM）");
-                }
-            });
+            if !page.run_mode.is_free() {
+                ui.horizontal(|ui| {
+                    ui.label("路线算法：");
+                    ui.selectable_value(&mut page.route_mode, RouteMode::Legacy, "经典打卡点环");
+                    ui.selectable_value(&mut page.route_mode, RouteMode::Road, "真实道路路由");
+                    if page.route_mode == RouteMode::Road && self.network.is_none() {
+                        ui.colored_label(theme::warn(), "（需先在「路网」页导入 OSM）");
+                    }
+                });
+            }
         }
 
         // 切换到真实道路路由时按需拉取电子围栏与实时点位（经典模式不触发这些端点）。
-        if self.run_page.route_mode == RouteMode::Road && prev_route != RouteMode::Road {
+        if !self.run_page.run_mode.is_free() && self.run_page.route_mode == RouteMode::Road
+            && (prev_route != RouteMode::Road || prev_mode != self.run_page.run_mode) {
             self.refresh_fence();
             self.refresh_points();
         }
@@ -448,7 +478,7 @@ impl App {
         let btn = if self.run_busy {
             theme::primary_btn("提交中…")
         } else {
-            theme::primary_btn("开始跑步")
+            theme::primary_btn(if self.run_page.run_mode.is_free() { "开始自由跑" } else { "开始跑步" })
         };
         mobile::row(ui, |ui| {
             if ui.add_enabled(enabled, btn).clicked() {
@@ -497,52 +527,85 @@ impl App {
     }
 
     fn draw_run_map(&mut self, ui: &mut egui::Ui) {
-        if self.run_page.route_mode != RouteMode::Road {
+        let free = self.run_page.run_mode.is_free();
+        if !free && self.run_page.route_mode != RouteMode::Road {
             return;
         }
-        let Some(net) = self.network.clone() else {
-            ui.colored_label(
-                theme::warn(),
-                "未加载 OSM 路网，无法预览（请先到「路网」页导入）",
-            );
-            return;
-        };
-        let Some(plan) = self.run_page.plan.clone() else {
-            return;
-        };
+        if free {
+            if self.identity.has_unconfigured_default_location() {
+                ui.colored_label(theme::warn(), "请先在设备页设置城市和跑步位置");
+                return;
+            }
+            let anchor = match self.identity.anchor_coordinate() {
+                Ok(anchor) => anchor,
+                Err(e) => { ui.colored_label(theme::warn(), e); return; }
+            };
+            let key = Some((anchor.latitude, anchor.longitude));
+            if self.run_page.preview_anchor != key {
+                self.run_page.preview_stale = true;
+                self.run_page.preview_anchor = key;
+            }
+            if self.run_page.preview_stale {
+                self.run_page.preview = None;
+                self.run_page.map_fitted = false;
+                self.run_page.preview_stale = false;
+                if let Some(plan) = self.run_page.plan.as_ref() {
+                    match crate::track::free::build(plan.dist * 1000.0, plan.dur, plan.seed, plan.start_ms, anchor) {
+                        Ok(track) => self.run_page.preview = Some(crate::track::generate_road::RoadPlan {
+                            route: track.locations.iter().filter(|p| p.ptype != -1).map(|p| (p.gLat, p.gLng)).collect(),
+                            length_m: track.totalDistance,
+                            edges: Vec::new(), buildings: Vec::new(), checkpoints: Vec::new(), fences: Vec::new(),
+                        }),
+                        Err(e) => { self.status = format!("自由跑预览失败：{e}"); }
+                    }
+                }
+            }
+        } else {
+            let Some(net) = self.network.clone() else {
+                ui.colored_label(
+                    theme::warn(),
+                    "未加载 OSM 路网，无法预览（请先到「路网」页导入）",
+                );
+                return;
+            };
+            let Some(plan) = self.run_page.plan.clone() else {
+                return;
+            };
 
-        if self.run_page.preview_stale {
-            self.run_page.preview = None;
-            self.run_page.map_fitted = false;
-            self.run_page.preview_stale = false;
-            // 点位缓存按锚点隔离（main 的串城市防护）；锚点无效时视为无缓存
-            let cached = self
-                .identity
-                .anchor_coordinate()
-                .ok()
-                .and_then(crate::api::model::load_points_cache_for);
-            if let Some((_ts, pts)) = cached {
-                let pts_bd = crate::api::points::points_bd(&pts);
-                if !pts_bd.is_empty() {
-                    let fences = crate::api::model::load_fence_cache().unwrap_or_default();
-                    match crate::track::generate_road::plan_road_view(
-                        &net,
-                        &pts_bd,
-                        plan.dist * 1000.0,
-                        plan.seed,
-                        &fences,
-                    ) {
-                        Ok(p) => self.run_page.preview = Some(p),
-                        Err(e) => self.status = format!("路线预览失败：{e}"),
+            if self.run_page.preview_stale {
+                self.run_page.preview = None;
+                self.run_page.map_fitted = false;
+                self.run_page.preview_stale = false;
+                // 点位缓存按锚点隔离（main 的串城市防护）；锚点无效时视为无缓存
+                let cached = self
+                    .identity
+                    .anchor_coordinate()
+                    .ok()
+                    .and_then(crate::api::model::load_points_cache_for);
+                if let Some((_ts, pts)) = cached {
+                    let pts_bd = crate::api::points::points_bd(&pts);
+                    if !pts_bd.is_empty() {
+                        let fences = crate::api::model::load_fence_cache().unwrap_or_default();
+                        match crate::track::generate_road::plan_road_view(
+                            &net,
+                            &pts_bd,
+                            plan.dist * 1000.0,
+                            plan.seed,
+                            &fences,
+                        ) {
+                            Ok(p) => self.run_page.preview = Some(p),
+                            Err(e) => self.status = format!("路线预览失败：{e}"),
+                        }
+                    } else {
+                        self.status = "无打卡点缓存，提交后可回显轨迹".into();
                     }
                 } else {
                     self.status = "无打卡点缓存，提交后可回显轨迹".into();
                 }
-            } else {
-                self.status = "无打卡点缓存，提交后可回显轨迹".into();
             }
-        }
 
+        }
+        let Some(plan) = self.run_page.plan.clone() else { return; };
         if self.run_page.preview.is_some() {
             super::map::legend(
                 ui,
@@ -638,7 +701,9 @@ impl App {
                     4.5,
                 );
             }
-            let label = if p.length_m > 0.0 {
+            let label = if free {
+                format!("自由跑 {:.2} km · 无必经打卡点", plan.dist)
+            } else if p.length_m > 0.0 {
                 let loops = plan.dist * 1000.0 / p.length_m;
                 if loops > 1.15 {
                     format!(
@@ -707,6 +772,8 @@ impl App {
         let start_ms = plan.start_ms;
         let face_check = if page.face_check { 1 } else { 0 };
         let route_mode = page.route_mode;
+        let run_mode = page.run_mode;
+        self.config.run_mode = run_mode;
         self.config.dist_min = page.dist_min;
         self.config.dist_max = page.dist_max;
         self.config.pace_min = page.pace_min;
@@ -736,6 +803,7 @@ impl App {
             let mut log = App::logger(tx.clone());
             let mut client = crate::api::client::ApiClient::new(identity, Some(session));
             let params = crate::api::flow::RunParams {
+                run_mode,
                 dist,
                 dur,
                 start_ms,
@@ -753,6 +821,8 @@ impl App {
                     ));
                     serde_json::json!({
                         "ok": true, "rrid": out.result.rrid,
+                        "mode": run_mode.label(), "complete": out.complete,
+                        "mode_matches": out.mode_matches,
                         "obs_ok": out.obs_ok, "verify": out.detail_ok,
                         "uuid": out.result.uuid,
                         "dist": out.result.total_dis, "dur": out.result.total_time,
@@ -774,6 +844,29 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mode_switch_discards_campus_preview_but_preserves_user_parameters() {
+        let mut p = page(1, 1);
+        p.ensure_plan();
+        let before = p.plan.clone().unwrap();
+        p.preview = Some(crate::track::generate_road::RoadPlan {
+            route: vec![(39.9, 116.4)], length_m: 1.0, edges: Vec::new(),
+            buildings: Vec::new(), checkpoints: vec![(39.9, 116.4)], fences: Vec::new(),
+        });
+        p.preview_stale = false;
+        p.map_fitted = true;
+        assert!(p.select_mode(crate::api::run_mode::RunMode::Free));
+        assert!(p.preview.is_none());
+        assert!(p.preview_stale);
+        assert!(!p.map_fitted);
+        let after = p.plan.as_ref().unwrap();
+        assert_eq!(before.seed, after.seed);
+        assert_eq!(before.start_ms, after.start_ms);
+        assert_eq!(before.dist, after.dist);
+        assert!(!p.select_mode(crate::api::run_mode::RunMode::Free));
+        assert!(p.select_mode(crate::api::run_mode::RunMode::Campus));
+    }
 
     /// 一份参数合理的页面状态（配速 6:00/km，距离 2 km 附近）。
     fn page(start_mode: usize, days_ago: i64) -> RunPage {
