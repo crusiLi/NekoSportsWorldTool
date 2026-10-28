@@ -9,6 +9,7 @@ use crate::{api::model::TrackColorMode, location::Coordinate};
 use route_planner::{Coord, RoadGraph, Route, RouteOptions, RoutePoint};
 
 pub struct RoadLoop {
+    closed: bool,
     route: Route,
     anchor: Coordinate,
     seed: u64,
@@ -95,6 +96,7 @@ pub fn plan_road(
         return Err("道路闭环过短，无法生成路线".into());
     }
     Ok(RoadLoop {
+        closed: true,
         route: Route {
             points,
             length_m: length,
@@ -116,6 +118,68 @@ pub fn plan_road(
 }
 
 impl RoadLoop {
+    /// Geometry already returned by a routing provider, in BD-09 coordinates.
+    pub fn from_polyline(
+        coords: &[(f64, f64)],
+        closed: bool,
+        dist: f64,
+        seed: u64,
+    ) -> Result<Self, String> {
+        let &(lat, lon) = coords.first().ok_or("高德路线为空")?;
+        let anchor = Coordinate::new(lat, lon, 0.)?;
+        let meter_lon = 111_320. * lat.to_radians().cos();
+        let mut points: Vec<RoutePoint> = Vec::new();
+        let mut length = 0.;
+        for &(lat, lon) in coords {
+            Coordinate::new(lat, lon, 0.)?;
+            if let Some(p) = points.last() {
+                let delta = ((lat - p.lat) * route_planner::graph::MET_PER_DEG_LAT)
+                    .hypot((lon - p.lon) * meter_lon);
+                if delta < 1e-6 {
+                    continue;
+                }
+                length += delta;
+            }
+            points.push(RoutePoint {
+                lat,
+                lon,
+                s: length,
+                curvature: 0.,
+            });
+        }
+        if points.len() < 2 || length < 30. || !length.is_finite() {
+            return Err("高德路线过短或无效".into());
+        }
+        if closed {
+            let last = points.last().unwrap();
+            let gap = ((last.lat - lat) * route_planner::graph::MET_PER_DEG_LAT)
+                .hypot((last.lon - lon) * meter_lon);
+            if gap > 2. {
+                return Err("高德往返路线未闭合，请重新获取路线".into());
+            }
+            if gap > 1e-6 {
+                length += gap;
+                points.push(RoutePoint {
+                    lat,
+                    lon,
+                    s: length,
+                    curvature: 0.,
+                });
+            }
+        }
+        Ok(Self {
+            closed,
+            route: Route {
+                points,
+                length_m: length,
+            },
+            anchor,
+            seed,
+            base_target: dist.min(600.),
+            edges: vec![],
+            buildings: vec![],
+        })
+    }
     pub fn matches(&self, anchor: Coordinate, dist: f64, seed: u64) -> bool {
         self.anchor == anchor && self.seed == seed && self.base_target == dist.min(600.)
     }
@@ -123,7 +187,11 @@ impl RoadLoop {
         self.route.length_m
     }
     fn point(&self, distance: f64) -> (f64, f64, f64) {
-        let s = distance.rem_euclid(self.length());
+        let s = if self.closed {
+            distance.rem_euclid(self.length())
+        } else {
+            distance.clamp(0., self.length())
+        };
         let i = self
             .route
             .points
@@ -150,6 +218,9 @@ impl RoadLoop {
                 }
             }
             lap += self.length();
+            if !self.closed {
+                break;
+            }
         }
         out.push(dist);
         out
@@ -180,6 +251,9 @@ impl RoadLoop {
         color: TrackColorMode,
     ) -> Result<Track, String> {
         dimensions(self.anchor, dist, dur)?;
+        if !self.closed && dist > self.length() + 0.01 {
+            return Err("单程距离超过路线全长，请重新预览".into());
+        }
         if !self.matches(self.anchor, dist, seed) {
             return Err("路线预览已过期，请重新规划".into());
         }
