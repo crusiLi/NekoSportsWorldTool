@@ -84,6 +84,14 @@ fn cmd_logout() -> i32 {
 fn cmd_run(rest: &[&str]) -> i32 {
     let flags = parse_flags(rest);
     let dry_run = get(&flags, "dry-run").is_some();
+    let run_mode =
+        match crate::api::run_mode::RunMode::parse(get(&flags, "mode").unwrap_or("campus")) {
+            Ok(m) => m,
+            Err(e) => {
+                eprintln!("{e}");
+                return 1;
+            }
+        };
     let dist_km: f32 = get(&flags, "dist")
         .and_then(|v| v.parse().ok())
         .unwrap_or(0.0);
@@ -118,17 +126,37 @@ fn cmd_run(rest: &[&str]) -> i32 {
         seed
     };
     let cfg = model::load_config();
-    let identity = model::load_identity();
+    let mut identity = model::load_identity();
     let sess = model::load_session();
-    let mut client = ApiClient::new(identity, sess.is_logged_in().then_some(sess));
+    match (get(&flags, "lat"), get(&flags, "lon")) {
+        (Some(lat), Some(lon)) => match (lat.parse::<f64>(), lon.parse::<f64>()) {
+            (Ok(lat), Ok(lon)) => match crate::location::Coordinate::new(lat, lon, 0.) {
+                Ok(a) => {
+                    identity.anchor_lat = a.latitude;
+                    identity.anchor_lon = a.longitude;
+                }
+                Err(e) => {
+                    eprintln!("{e}");
+                    return 1;
+                }
+            },
+            _ => {
+                eprintln!("经纬度必须是数字");
+                return 1;
+            }
+        },
+        (None, None) => {}
+        _ => {
+            eprintln!("--lat 和 --lon 必须同时提供");
+            return 1;
+        }
+    }
     let track_color_mode = match get(&flags, "track-color") {
         None => cfg.track_color_mode,
         Some("mixed") | Some("gray") | Some("grey") | Some("half-green-gray") => {
             model::TrackColorMode::HalfGreenGray
         }
-        Some("green") | Some("full-green") | Some("full_green") => {
-            model::TrackColorMode::FullGreen
-        }
+        Some("green") | Some("full-green") | Some("full_green") => model::TrackColorMode::FullGreen,
         Some(value) => {
             eprintln!("--track-color 必须是 full-green 或 half-green-gray（收到 {value}）");
             return 1;
@@ -205,6 +233,8 @@ fn cmd_run(rest: &[&str]) -> i32 {
 
     let mut log = logger();
     let params = crate::api::flow::RunParams {
+        run_mode,
+        free_road_plan: None,
         dist,
         dur,
         start_ms,
@@ -219,6 +249,22 @@ fn cmd_run(rest: &[&str]) -> i32 {
         custom: custom_spec,
         amap_key,
     };
+    if dry_run {
+        let result = identity
+            .anchor_coordinate()
+            .and_then(|a| crate::api::flow::run_dry_run(&params, a));
+        return match result {
+            Ok(s) => {
+                println!("{}", serde_json::to_string_pretty(&s).unwrap());
+                0
+            }
+            Err(e) => {
+                eprintln!("本地校验失败：{e}");
+                1
+            }
+        };
+    }
+    let mut client = ApiClient::new(identity, sess.is_logged_in().then_some(sess));
     match crate::api::flow::run_full_flow(&mut client, &params, &mut log) {
         Ok(out) => {
             println!(
@@ -226,7 +272,11 @@ fn cmd_run(rest: &[&str]) -> i32 {
                 out.result.rrid,
                 out.result.uuid,
                 out.obs_ok,
-                if out.detail_ok { "通过" } else { "未通过" }
+                if out.detail_ok {
+                    "已获取详情"
+                } else {
+                    "未获取详情"
+                }
             );
             0
         }
@@ -254,17 +304,27 @@ fn cmd_route(rest: &[&str]) -> i32 {
         origin: origin.to_string(),
         destination: destination.to_string(),
         loop_mode: get(&flags, "loop").is_some(),
-        laps: get(&flags, "laps").and_then(|v| v.parse().ok()).unwrap_or(0),
+        laps: get(&flags, "laps")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0),
     };
     match crate::amap::fetch_custom_ring(&spec, &key) {
         Ok(ring) => {
             println!("高德自定义路线预览（仅本地，不上传）");
             println!(
                 "模式：{}",
-                if ring.loop_mode { "绕圈（去程+返程闭环）" } else { "单程" }
+                if ring.loop_mode {
+                    "绕圈（去程+返程闭环）"
+                } else {
+                    "单程"
+                }
             );
             println!("去程：{:.0} m", ring.leg_length_m);
-            println!("闭环总长：{:.0} m（{} 个折线点）", ring.total_length_m, ring.points_bd.len());
+            println!(
+                "闭环总长：{:.0} m（{} 个折线点）",
+                ring.total_length_m,
+                ring.points_bd.len()
+            );
             if spec.laps > 0 {
                 println!(
                     "圈数：{} 圈 → {:.0} m",
@@ -452,11 +512,17 @@ fn cmd_records_raw(rest: &[&str]) -> i32 {
             } else if n > 0 {
                 println!(
                     "首条: {}",
-                    crate::textlog::redact_text(&crate::textlog::truncate(&arr[0].to_string(), 300))
+                    crate::textlog::redact_text(&crate::textlog::truncate(
+                        &arr[0].to_string(),
+                        300
+                    ))
                 );
                 println!(
                     "末条: {}",
-                    crate::textlog::redact_text(&crate::textlog::truncate(&arr[n - 1].to_string(), 300))
+                    crate::textlog::redact_text(&crate::textlog::truncate(
+                        &arr[n - 1].to_string(),
+                        300
+                    ))
                 );
             } else {
                 println!(
