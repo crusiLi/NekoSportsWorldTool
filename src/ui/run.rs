@@ -1367,7 +1367,7 @@ impl App {
                     serde_json::json!({
                         "ok": true, "rrid": out.result.rrid,
                         "mode":run_mode.label(), "complete":out.complete, "mode_matches":out.mode_matches,
-                        "obs_ok": out.obs_ok, "verify": out.detail_ok,
+                        "obs_ok": out.obs_ok, "verify": out.detail_ok, "track_readback": out.track_readback,
                         "uuid": out.result.uuid,
                         "dist": out.result.total_dis, "dur": out.result.total_time,
                         "steps": out.result.total_steps, "avg_step_freq": out.result.avg_step_freq,

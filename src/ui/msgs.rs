@@ -472,15 +472,38 @@ fn run_popup(v: &serde_json::Value) -> PopupInfo {
         ),
         format!("开始时间：{}", fmt_hms(v["start"].as_i64().unwrap_or(0))),
         format!(
-            "OBS 上传：{}/2 · 详情验证：{}",
+            "OBS 上传：{}/2 · 详情获取：{}",
             v["obs_ok"].as_i64().unwrap_or(0),
             if v["verify"].as_bool().unwrap_or(false) {
-                "通过"
+                "成功"
             } else {
-                "未通过"
+                "未成功"
             }
         ),
     ];
+    if let Some(readback) = v.get("track_readback").and_then(|x| x.as_object()) {
+        let checked = readback
+            .get("checked")
+            .and_then(|x| x.as_u64())
+            .unwrap_or(0);
+        let matched = readback
+            .get("matched")
+            .and_then(|x| x.as_u64())
+            .unwrap_or(0);
+        let total = readback.get("total").and_then(|x| x.as_u64()).unwrap_or(0);
+        let status = if checked == 0 {
+            "暂无法确认"
+        } else if matched < checked {
+            "数据不一致"
+        } else if checked < total {
+            "部分一致，其余未确认"
+        } else {
+            "数据一致"
+        };
+        lines.push(format!(
+            "轨迹回读：{matched}/{total}，{status}；详情显示需在运动世界查看"
+        ));
+    }
     // 达标判定明细（详情接口 reasonList）
     if let Ok(detail) = crate::api::flow::VERIFY_DETAIL.lock() {
         if let Some(d) = detail.as_ref() {
