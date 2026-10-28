@@ -9,6 +9,7 @@
 
 pub mod about;
 pub mod ai;
+mod custom_preview;
 pub mod data;
 pub mod device;
 pub mod fonts;
@@ -382,7 +383,7 @@ impl App {
                 custom_loop: config.custom_loop,
                 custom_laps: config.custom_laps,
                 amap_key: config.amap_key.clone(),
-                custom_preview: None,
+                custom_state: Default::default(),
                 custom_status: String::new(),
             },
             ai_page: ai::AiPage {

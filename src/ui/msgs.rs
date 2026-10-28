@@ -29,7 +29,7 @@ impl App {
         let mut update_chk = None;
         let mut update_prog = None;
         let mut update_done = None;
-        let mut custom_route_json = None;
+        let mut custom_route_json = Vec::new();
         while let Ok(msg) = self.rx.try_recv() {
             if let Some(v) = msg.strip_prefix(IP) {
                 done_ip = Some(v.to_string());
@@ -76,7 +76,7 @@ impl App {
             } else if let Some(v) = msg.strip_prefix(UPDATE_DONE) {
                 update_done = Some(v.to_string());
             } else if let Some(v) = msg.strip_prefix(CUSTOM_ROUTE_DONE) {
-                custom_route_json = Some(v.to_string());
+                custom_route_json.push(v.to_string());
             } else {
                 self.log.push(&msg);
             }
@@ -359,13 +359,16 @@ impl App {
                 });
             }
         }
-        if let Some(v) = custom_route_json {
+        for v in custom_route_json {
             let val: serde_json::Value = serde_json::from_str(&v).unwrap_or_default();
             if val.get("ok").and_then(|b| b.as_bool()).unwrap_or(false) {
                 if let Ok(ring) = serde_json::from_value::<crate::track::custom::CustomRing>(
                     val.get("ring").cloned().unwrap_or(serde_json::Value::Null),
                 ) {
-                    self.run_page.custom_preview = Some(ring);
+                    let id = val["request_id"].as_u64().unwrap_or(0);
+                    if !self.run_page.custom_state.accept(id, Some(ring)) {
+                        continue;
+                    }
                     self.run_page.map_fitted = false;
                     self.run_page.custom_status = val
                         .get("message")
@@ -374,9 +377,23 @@ impl App {
                         .to_string();
                     self.status = self.run_page.custom_status.clone();
                 } else {
+                    if !self
+                        .run_page
+                        .custom_state
+                        .accept(val["request_id"].as_u64().unwrap_or(0), None)
+                    {
+                        continue;
+                    }
                     self.run_page.custom_status = "路线数据解析失败".into();
                 }
             } else {
+                if !self
+                    .run_page
+                    .custom_state
+                    .accept(val["request_id"].as_u64().unwrap_or(0), None)
+                {
+                    continue;
+                }
                 self.run_page.custom_status = format!(
                     "获取路线失败：{}",
                     val["message"].as_str().unwrap_or("未知错误")

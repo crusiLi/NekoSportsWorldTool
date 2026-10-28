@@ -108,7 +108,7 @@ pub struct RunPage {
     /// 高德 Web 服务 Key（留空用 config.amap_key）
     pub amap_key: String,
     /// 自定义路线预览（高德解析结果）
-    pub custom_preview: Option<crate::track::custom::CustomRing>,
+    pub custom_state: super::custom_preview::State,
     /// 自定义路线预览状态文本
     pub custom_status: String,
 }
@@ -136,6 +136,26 @@ pub struct RunPlan {
 }
 
 impl RunPage {
+    fn current_custom_spec(&self) -> crate::track::custom::CustomRouteSpec {
+        crate::track::custom::CustomRouteSpec {
+            origin: self.custom_origin.trim().into(),
+            destination: self.custom_destination.trim().into(),
+            loop_mode: self.custom_loop,
+            laps: self.custom_laps,
+        }
+    }
+    fn custom_plan(&self) -> Result<crate::track::free_custom::Plan, String> {
+        let snapshot = self
+            .custom_state
+            .snapshot
+            .as_ref()
+            .ok_or("请先点击获取路线，等待高德预览完成")?;
+        if snapshot.spec != self.current_custom_spec() {
+            return Err("高德路线设置已改变，请重新获取路线".into());
+        }
+        let plan = self.plan.as_ref().ok_or("跑步方案尚未准备")?;
+        snapshot.plan(plan.dist * 1000., plan.dur, plan.seed)
+    }
     /// 距离/配速是否与方案一致（不一致需重掷运动参数）。
     fn shape_matches(&self, p: &RunPlan) -> bool {
         p.dist_min == self.dist_min
@@ -316,11 +336,8 @@ impl App {
         }
         if self.run_page.run_mode.is_free() {
             ui.label(
-                "自由跑无必经打卡点。沿真实道路需导入覆盖当前位置的 OSM；自由环线不依据道路。",
+                "自由跑无必经打卡点。高德自定义路线填写起终点即可使用；沿真实道路使用导入的 OSM 路网。",
             );
-            if self.run_page.route_mode == RouteMode::Custom {
-                self.run_page.route_mode = RouteMode::Road;
-            }
         }
         let mut custom_fetch_wanted = false;
         {
@@ -465,9 +482,11 @@ impl App {
                         "真实道路路由"
                     },
                 );
-                if !page.run_mode.is_free() {
-                    ui.selectable_value(&mut page.route_mode, RouteMode::Custom, "自定义路线");
-                }
+                ui.selectable_value(
+                    &mut page.route_mode,
+                    RouteMode::Custom,
+                    "自定义路线（高德）",
+                );
                 if page.route_mode == RouteMode::Road && self.network.is_none() {
                     ui.colored_label(theme::warn(), "（需先在「路网」页导入 OSM）");
                 }
@@ -537,7 +556,7 @@ impl App {
                     );
                 });
                 mobile::row(ui, |ui| {
-                    let busy = page.custom_status.starts_with("获取中");
+                    let busy = page.custom_state.busy();
                     let btn = if busy {
                         theme::primary_btn("获取中…")
                     } else {
@@ -614,6 +633,20 @@ impl App {
                 ui.label("（全绿色可避免详情页出现灰色分段）");
             });
         }
+        let custom_spec = self.run_page.current_custom_spec();
+        let custom_key = if self.run_page.amap_key.trim().is_empty() {
+            self.config.amap_key.clone()
+        } else {
+            self.run_page.amap_key.trim().to_string()
+        };
+        if self.run_page.custom_state.observe(
+            custom_spec,
+            custom_key,
+            self.run_page.run_mode.is_free(),
+        ) {
+            self.run_page.custom_status = "设置已改变，请获取路线".into();
+            self.run_page.map_fitted = false;
+        }
         if custom_fetch_wanted {
             self.refresh_custom_route();
         }
@@ -675,7 +708,10 @@ impl App {
         let road_ready = !self.run_page.run_mode.is_free()
             || self.run_page.route_mode != RouteMode::Road
             || (!self.osm_page.busy && self.run_page.free_preview.ready());
-        let enabled = !self.run_busy && self.session.is_some() && road_ready;
+        let custom_ready = !self.run_page.run_mode.is_free()
+            || self.run_page.route_mode != RouteMode::Custom
+            || self.run_page.custom_plan().is_ok();
+        let enabled = !self.run_busy && self.session.is_some() && road_ready && custom_ready;
         let btn = if self.run_busy {
             theme::primary_btn("提交中…")
         } else {
@@ -733,7 +769,9 @@ impl App {
 
     fn draw_run_map(&mut self, ui: &mut egui::Ui) {
         let free = self.run_page.run_mode.is_free();
-        if !free && self.run_page.route_mode != RouteMode::Road {
+        if self.run_page.route_mode == RouteMode::Custom
+            || (!free && self.run_page.route_mode != RouteMode::Road)
+        {
             return;
         }
         let net = if free && self.run_page.route_mode == RouteMode::Legacy {
@@ -1016,19 +1054,39 @@ impl App {
         if self.run_page.route_mode != RouteMode::Custom {
             return;
         }
-        let Some(ring) = self.run_page.custom_preview.clone() else {
+        let free = self.run_page.run_mode.is_free();
+        let Some(snapshot) = self.run_page.custom_state.snapshot.clone() else {
             return;
         };
+        let ring = &snapshot.ring;
+        let route = if free {
+            match self.run_page.custom_plan() {
+                Ok(plan) => {
+                    ui.label(format!(
+                        "本次高德自由跑：实际 {:.2} km · 用时 {} 秒；预览即本次路线",
+                        plan.distance / 1000.,
+                        plan.duration
+                    ));
+                    plan.preview().route
+                }
+                Err(e) => {
+                    ui.colored_label(theme::warn(), e);
+                    return;
+                }
+            }
+        } else {
+            ring.points_bd.clone()
+        };
         ui.add_space(4.0);
-        super::map::legend(
-            ui,
-            &[
-                ("路线", egui::Color32::from_rgb(30, 111, 216)),
-                ("打卡点", egui::Color32::from_rgb(240, 180, 0)),
-                ("起点", egui::Color32::from_rgb(22, 160, 90)),
-                ("终点", egui::Color32::from_rgb(220, 38, 38)),
-            ],
-        );
+        let mut legend = vec![
+            ("路线", egui::Color32::from_rgb(30, 111, 216)),
+            ("起点", egui::Color32::from_rgb(22, 160, 90)),
+            ("终点", egui::Color32::from_rgb(220, 38, 38)),
+        ];
+        if !free {
+            legend.push(("打卡点", egui::Color32::from_rgb(240, 180, 0)));
+        }
+        super::map::legend(ui, &legend);
         let rect = ui.available_rect_before_wrap();
         let (response, painter) = ui.allocate_painter(
             egui::Vec2::new(rect.width().max(200.0), 220.0),
@@ -1041,12 +1099,15 @@ impl App {
             egui::Color32::from_rgb(250, 252, 251),
         );
         if !self.run_page.map_fitted {
-            let mut bounds: Vec<(f64, f64)> = ring.points_bd.clone();
-            if let Some((_ts, pts)) = self
-                .identity
-                .anchor_coordinate()
-                .ok()
-                .and_then(crate::api::model::load_points_cache_for)
+            let mut bounds: Vec<(f64, f64)> = route.clone();
+            if let Some((_ts, pts)) = (!free)
+                .then(|| {
+                    self.identity
+                        .anchor_coordinate()
+                        .ok()
+                        .and_then(crate::api::model::load_points_cache_for)
+                })
+                .flatten()
             {
                 bounds.extend(crate::api::points::points_bd(&pts));
             }
@@ -1058,12 +1119,15 @@ impl App {
         let route_c = egui::Color32::from_rgb(30, 111, 216);
         self.run_page
             .map
-            .draw_polyline(&painter, canvas, &ring.points_bd, route_c, 2.5);
-        if let Some((_ts, pts)) = self
-            .identity
-            .anchor_coordinate()
-            .ok()
-            .and_then(crate::api::model::load_points_cache_for)
+            .draw_polyline(&painter, canvas, &route, route_c, 2.5);
+        if let Some((_ts, pts)) = (!free)
+            .then(|| {
+                self.identity
+                    .anchor_coordinate()
+                    .ok()
+                    .and_then(crate::api::model::load_points_cache_for)
+            })
+            .flatten()
         {
             let cp = egui::Color32::from_rgb(240, 180, 0);
             for (la, lo) in crate::api::points::points_bd(&pts) {
@@ -1072,7 +1136,7 @@ impl App {
                     .draw_point(&painter, canvas, la, lo, cp, 3.0);
             }
         }
-        if let Some(first) = ring.points_bd.first() {
+        if let Some(first) = route.first() {
             self.run_page.map.draw_point(
                 &painter,
                 canvas,
@@ -1082,7 +1146,7 @@ impl App {
                 4.5,
             );
         }
-        if let Some(last) = ring.points_bd.last() {
+        if let Some(last) = route.last() {
             self.run_page.map.draw_point(
                 &painter,
                 canvas,
@@ -1093,8 +1157,9 @@ impl App {
             );
         }
         let label = format!(
-            "高德路线：去程 {:.0} m · 闭环 {:.0} m · {} 点",
+            "高德路线：去程 {:.0} m · {} {:.0} m · {} 点",
             ring.leg_length_m,
+            if ring.loop_mode { "闭环" } else { "单程" },
             ring.total_length_m,
             ring.points_bd.len()
         );
@@ -1132,9 +1197,17 @@ impl App {
         self.config.custom_loop = spec.loop_mode;
         self.config.custom_laps = spec.laps;
         let _ = crate::api::model::save_config(&self.config);
+        self.run_page.custom_state.observe(
+            spec.clone(),
+            key.clone(),
+            self.run_page.run_mode.is_free(),
+        );
+        let request_id = self.run_page.custom_state.begin();
+        let free = self.run_page.run_mode.is_free();
         self.run_page.custom_status = "获取中…".into();
         self.spawn_job(move |tx| {
-            let payload = match crate::amap::fetch_custom_ring(&spec, &key) {
+            let fetched=if free {crate::amap::fetch_free_custom_ring(&spec,&key)} else {crate::amap::fetch_custom_ring(&spec,&key)};
+            let payload = match fetched {
                 Ok(ring) => {
                     let msg = format!(
                         "√ 去程 {:.0} m · 闭环 {:.0} m（{}）",
@@ -1142,9 +1215,9 @@ impl App {
                         ring.total_length_m,
                         if ring.loop_mode { "绕圈" } else { "单程" }
                     );
-                    serde_json::json!({ "ok": true, "ring": ring, "message": msg })
+                    serde_json::json!({ "ok": true, "ring": ring, "message": msg, "request_id":request_id })
                 }
-                Err(e) => serde_json::json!({ "ok": false, "message": e }),
+                Err(e) => serde_json::json!({ "ok": false, "message": e, "request_id":request_id }),
             };
             tx.send(format!("{}{}", crate::ui::CUSTOM_ROUTE_DONE, payload))
                 .ok();
@@ -1177,6 +1250,13 @@ impl App {
         let route_mode = page.route_mode;
         let run_mode = page.run_mode;
         let free_road_plan = page.free_preview.road.clone();
+        let free_custom_route = page.custom_state.snapshot.clone();
+        if run_mode.is_free() && route_mode == RouteMode::Custom {
+            if let Err(e) = page.custom_plan() {
+                self.status = e;
+                return;
+            }
+        }
         if run_mode.is_free() && route_mode == RouteMode::Road {
             let ready = self
                 .identity
@@ -1263,7 +1343,7 @@ impl App {
             let mut log = App::logger(tx.clone());
             let mut client = crate::api::client::ApiClient::new(identity, Some(session));
             let params = crate::api::flow::RunParams {
-                run_mode, free_road_plan,
+                run_mode, free_road_plan, free_custom_route,
                 dist,
                 dur,
                 start_ms,
