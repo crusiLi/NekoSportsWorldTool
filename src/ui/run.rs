@@ -63,6 +63,8 @@ fn days_ago_label(days_ago: i64) -> String {
 
 #[derive(Default)]
 pub struct RunPage {
+    pub run_mode: crate::api::run_mode::RunMode,
+    pub free_preview: super::free_preview::State,
     pub dist_min: f32,
     pub dist_max: f32,
     pub pace_min: f32,
@@ -290,6 +292,36 @@ impl App {
 
     fn draw_run_content(&mut self, ui: &mut egui::Ui) {
         let prev_route = self.run_page.route_mode;
+        let prev_mode = self.run_page.run_mode;
+        ui.horizontal(|ui| {
+            ui.label("跑步模式：");
+            ui.selectable_value(
+                &mut self.run_page.run_mode,
+                crate::api::run_mode::RunMode::Campus,
+                "校园跑",
+            );
+            ui.selectable_value(
+                &mut self.run_page.run_mode,
+                crate::api::run_mode::RunMode::Free,
+                "自由跑",
+            );
+        });
+        if prev_mode != self.run_page.run_mode {
+            self.run_page.preview = None;
+            self.run_page.preview_stale = true;
+            self.run_page.map_fitted = false;
+            self.run_page.free_preview.invalidate();
+            self.config.run_mode = self.run_page.run_mode;
+            let _ = crate::api::model::save_config(&self.config);
+        }
+        if self.run_page.run_mode.is_free() {
+            ui.label(
+                "自由跑无必经打卡点。沿真实道路需导入覆盖当前位置的 OSM；自由环线不依据道路。",
+            );
+            if self.run_page.route_mode == RouteMode::Custom {
+                self.run_page.route_mode = RouteMode::Road;
+            }
+        }
         let mut custom_fetch_wanted = false;
         {
             let page = &mut self.run_page;
@@ -415,14 +447,32 @@ impl App {
             });
             ui.horizontal(|ui| {
                 ui.label("路线算法：");
-                ui.selectable_value(&mut page.route_mode, RouteMode::Legacy, "经典打卡点环");
-                ui.selectable_value(&mut page.route_mode, RouteMode::Road, "真实道路路由");
-                ui.selectable_value(&mut page.route_mode, RouteMode::Custom, "自定义路线");
+                ui.selectable_value(
+                    &mut page.route_mode,
+                    RouteMode::Legacy,
+                    if page.run_mode.is_free() {
+                        "自由环线"
+                    } else {
+                        "经典打卡点环"
+                    },
+                );
+                ui.selectable_value(
+                    &mut page.route_mode,
+                    RouteMode::Road,
+                    if page.run_mode.is_free() {
+                        "沿真实道路"
+                    } else {
+                        "真实道路路由"
+                    },
+                );
+                if !page.run_mode.is_free() {
+                    ui.selectable_value(&mut page.route_mode, RouteMode::Custom, "自定义路线");
+                }
                 if page.route_mode == RouteMode::Road && self.network.is_none() {
                     ui.colored_label(theme::warn(), "（需先在「路网」页导入 OSM）");
                 }
             });
-            if page.route_mode == RouteMode::Road {
+            if !page.run_mode.is_free() && page.route_mode == RouteMode::Road {
                 ui.horizontal(|ui| {
                     ui.label("随机普通点：");
                     let before = page.ordinary_pick;
@@ -476,7 +526,15 @@ impl App {
                 mobile::row(ui, |ui| {
                     ui.checkbox(&mut page.custom_loop, "绕圈跑（去程+返程闭环）");
                     ui.label("圈数：");
-                    mobile::drag_i64(ui, "run_custom_laps", &mut page.custom_laps, 0..=99, 1.0, "", "（0=按距离自动）");
+                    mobile::drag_i64(
+                        ui,
+                        "run_custom_laps",
+                        &mut page.custom_laps,
+                        0..=99,
+                        1.0,
+                        "",
+                        "（0=按距离自动）",
+                    );
                 });
                 mobile::row(ui, |ui| {
                     let busy = page.custom_status.starts_with("获取中");
@@ -491,54 +549,56 @@ impl App {
                     ui.label(&page.custom_status);
                 });
             }
-            mobile::row(ui, |ui| {
-                ui.label("操场规格：");
-                egui::ComboBox::from_id_salt("run_track_spec")
-                    .width(180.0)
-                    .selected_text(match page.track_spec {
-                        crate::track::stadium::TrackSpec::Custom { total_m } => {
-                            format!("自定义 {total_m} 米")
-                        }
-                        spec => spec.label().to_string(),
-                    })
-                    .show_ui(ui, |ui| {
-                        for spec in [
-                            crate::track::stadium::TrackSpec::Auto,
-                            crate::track::stadium::TrackSpec::M200,
-                            crate::track::stadium::TrackSpec::M300,
-                            crate::track::stadium::TrackSpec::M400,
-                        ] {
-                            ui.selectable_value(&mut page.track_spec, spec, spec.label());
-                        }
-                        let custom_length = page
-                            .custom_track_length
-                            .parse::<u32>()
-                            .ok()
-                            .filter(|length| (100..=1000).contains(length))
-                            .unwrap_or(400);
-                        ui.selectable_value(
-                            &mut page.track_spec,
-                            crate::track::stadium::TrackSpec::Custom {
-                                total_m: custom_length,
-                            },
-                            format!("自定义 {custom_length} 米"),
+            if !page.run_mode.is_free() {
+                mobile::row(ui, |ui| {
+                    ui.label("操场规格：");
+                    egui::ComboBox::from_id_salt("run_track_spec")
+                        .width(180.0)
+                        .selected_text(match page.track_spec {
+                            crate::track::stadium::TrackSpec::Custom { total_m } => {
+                                format!("自定义 {total_m} 米")
+                            }
+                            spec => spec.label().to_string(),
+                        })
+                        .show_ui(ui, |ui| {
+                            for spec in [
+                                crate::track::stadium::TrackSpec::Auto,
+                                crate::track::stadium::TrackSpec::M200,
+                                crate::track::stadium::TrackSpec::M300,
+                                crate::track::stadium::TrackSpec::M400,
+                            ] {
+                                ui.selectable_value(&mut page.track_spec, spec, spec.label());
+                            }
+                            let custom_length = page
+                                .custom_track_length
+                                .parse::<u32>()
+                                .ok()
+                                .filter(|length| (100..=1000).contains(length))
+                                .unwrap_or(400);
+                            ui.selectable_value(
+                                &mut page.track_spec,
+                                crate::track::stadium::TrackSpec::Custom {
+                                    total_m: custom_length,
+                                },
+                                format!("自定义 {custom_length} 米"),
+                            );
+                        });
+                    if matches!(
+                        page.track_spec,
+                        crate::track::stadium::TrackSpec::Custom { .. }
+                    ) {
+                        ui.label("长度");
+                        mobile::text_edit(
+                            ui,
+                            "run_custom_track_length",
+                            &mut page.custom_track_length,
+                            crate::platform::InputKind::Text,
+                            70.0,
                         );
-                    });
-                if matches!(
-                    page.track_spec,
-                    crate::track::stadium::TrackSpec::Custom { .. }
-                ) {
-                    ui.label("长度");
-                    mobile::text_edit(
-                        ui,
-                        "run_custom_track_length",
-                        &mut page.custom_track_length,
-                        crate::platform::InputKind::Text,
-                        70.0,
-                    );
-                    ui.label("100-1000 米");
-                }
-            });
+                        ui.label("100-1000 米");
+                    }
+                });
+            }
             ui.horizontal(|ui| {
                 ui.label("路线颜色：");
                 ui.radio_value(
@@ -559,7 +619,16 @@ impl App {
         }
 
         // 切换到真实道路路由时按需拉取电子围栏与实时点位（经典模式不触发这些端点）。
-        if self.run_page.route_mode == RouteMode::Road && prev_route != RouteMode::Road {
+        if prev_route != self.run_page.route_mode {
+            self.run_page.preview = None;
+            self.run_page.preview_stale = true;
+            self.run_page.map_fitted = false;
+            self.run_page.free_preview.invalidate();
+        }
+        if !self.run_page.run_mode.is_free()
+            && self.run_page.route_mode == RouteMode::Road
+            && (prev_route != RouteMode::Road || prev_mode != self.run_page.run_mode)
+        {
             self.refresh_fence();
             self.refresh_points();
         }
@@ -603,11 +672,18 @@ impl App {
         self.draw_custom_map(ui);
 
         ui.add_space(8.0);
-        let enabled = !self.run_busy && self.session.is_some();
+        let road_ready = !self.run_page.run_mode.is_free()
+            || self.run_page.route_mode != RouteMode::Road
+            || (!self.osm_page.busy && self.run_page.free_preview.ready());
+        let enabled = !self.run_busy && self.session.is_some() && road_ready;
         let btn = if self.run_busy {
             theme::primary_btn("提交中…")
         } else {
-            theme::primary_btn("开始跑步")
+            theme::primary_btn(if self.run_page.run_mode.is_free() {
+                "开始自由跑"
+            } else {
+                "开始跑步"
+            })
         };
         mobile::row(ui, |ui| {
             if ui.add_enabled(enabled, btn).clicked() {
@@ -656,10 +732,18 @@ impl App {
     }
 
     fn draw_run_map(&mut self, ui: &mut egui::Ui) {
-        if self.run_page.route_mode != RouteMode::Road {
+        let free = self.run_page.run_mode.is_free();
+        if !free && self.run_page.route_mode != RouteMode::Road {
             return;
         }
-        let Some(net) = self.network.clone() else {
+        let net = if free && self.run_page.route_mode == RouteMode::Legacy {
+            Some(std::sync::Arc::new(route_planner::RoadGraph::new()))
+        } else {
+            self.network.clone()
+        };
+        let Some(net) = net else {
+            self.run_page.free_preview.invalidate();
+            self.run_page.preview = None;
             ui.colored_label(
                 theme::warn(),
                 "未加载 OSM 路网，无法预览（请先到「路网」页导入）",
@@ -670,7 +754,83 @@ impl App {
             return;
         };
 
-        if self.run_page.preview_stale {
+        if free {
+            if self.identity.has_unconfigured_default_location() {
+                self.run_page.free_preview.invalidate();
+                self.run_page.preview = None;
+                ui.colored_label(theme::warn(), "请先在设备页设置城市和自由跑位置");
+                return;
+            }
+            match self.identity.anchor_coordinate() {
+                Ok(anchor) if self.run_page.route_mode == RouteMode::Legacy => {
+                    if self.run_page.preview_stale || self.run_page.preview.is_none() {
+                        match crate::track::free::build_with_color(
+                            plan.dist * 1000.,
+                            plan.dur,
+                            plan.seed,
+                            plan.start_ms,
+                            anchor,
+                            self.run_page.track_color_mode,
+                        ) {
+                            Ok(t) => {
+                                self.run_page.preview =
+                                    Some(crate::track::generate_road::RoadPlan {
+                                        route: t
+                                            .locations
+                                            .iter()
+                                            .map(|p| (p.gLat, p.gLng))
+                                            .collect(),
+                                        length_m: t.totalDistance,
+                                        edges: vec![],
+                                        buildings: vec![],
+                                        checkpoints: vec![],
+                                        fences: vec![],
+                                    });
+                                self.run_page.preview_stale = false;
+                                self.run_page.map_fitted = false;
+                            }
+                            Err(e) => {
+                                self.run_page.preview = None;
+                                ui.colored_label(theme::warn(), e);
+                            }
+                        }
+                    }
+                    ui.label("自由环线为本地几何路线，不依据真实道路");
+                }
+                Ok(anchor) => {
+                    let updated = self.run_page.free_preview.update(
+                        net.clone(),
+                        anchor,
+                        plan.dist * 1000.,
+                        plan.seed,
+                        ui.ctx(),
+                    );
+                    if updated || self.run_page.preview.is_none() {
+                        self.run_page.preview = self
+                            .run_page
+                            .free_preview
+                            .road
+                            .as_ref()
+                            .map(|r| r.preview(plan.dist * 1000.));
+                        self.run_page.map_fitted = false;
+                    }
+                    if !self.run_page.free_preview.ready() {
+                        self.run_page.preview = None;
+                    }
+                    ui.label(&self.run_page.free_preview.status);
+                    if ui.small_button("重新规划道路路线").clicked() {
+                        self.run_page.free_preview.invalidate();
+                        self.run_page.preview = None;
+                    }
+                }
+                Err(e) => {
+                    self.run_page.free_preview.invalidate();
+                    self.run_page.preview = None;
+                    ui.colored_label(theme::warn(), e);
+                }
+            }
+        }
+        if !free && self.run_page.preview_stale {
             self.run_page.preview = None;
             self.run_page.map_fitted = false;
             self.run_page.preview_stale = false;
@@ -801,7 +961,12 @@ impl App {
                     4.5,
                 );
             }
-            let label = if p.length_m > 0.0 {
+            let label = if free {
+                format!(
+                    "自由跑 {:.2} km · 起点绿色 / 终点红色 · 无必经点",
+                    plan.dist
+                )
+            } else if p.length_m > 0.0 {
                 let loops = plan.dist * 1000.0 / p.length_m;
                 if loops > 1.15 {
                     format!(
@@ -902,7 +1067,9 @@ impl App {
         {
             let cp = egui::Color32::from_rgb(240, 180, 0);
             for (la, lo) in crate::api::points::points_bd(&pts) {
-                self.run_page.map.draw_point(&painter, canvas, la, lo, cp, 3.0);
+                self.run_page
+                    .map
+                    .draw_point(&painter, canvas, la, lo, cp, 3.0);
             }
         }
         if let Some(first) = ring.points_bd.first() {
@@ -1008,6 +1175,24 @@ impl App {
         let start_ms = plan.start_ms;
         let face_check = if page.face_check { 1 } else { 0 };
         let route_mode = page.route_mode;
+        let run_mode = page.run_mode;
+        let free_road_plan = page.free_preview.road.clone();
+        if run_mode.is_free() && route_mode == RouteMode::Road {
+            let ready = self
+                .identity
+                .anchor_coordinate()
+                .ok()
+                .and_then(|a| {
+                    free_road_plan
+                        .as_ref()
+                        .map(|r| r.matches(a, dist, plan.seed))
+                })
+                .unwrap_or(false);
+            if self.osm_page.busy || !ready {
+                self.status = "请等待当前道路路线预览完成".into();
+                return;
+            }
+        }
         let ordinary_pick = page.ordinary_pick.max(0) as usize;
         let track_spec = match page.track_spec {
             crate::track::stadium::TrackSpec::Custom { .. } => {
@@ -1040,6 +1225,7 @@ impl App {
         } else {
             page.amap_key.trim().to_string()
         };
+        self.config.run_mode = run_mode;
         self.config.dist_min = page.dist_min;
         self.config.dist_max = page.dist_max;
         self.config.pace_min = page.pace_min;
@@ -1077,6 +1263,7 @@ impl App {
             let mut log = App::logger(tx.clone());
             let mut client = crate::api::client::ApiClient::new(identity, Some(session));
             let params = crate::api::flow::RunParams {
+                run_mode, free_road_plan,
                 dist,
                 dur,
                 start_ms,
@@ -1099,6 +1286,7 @@ impl App {
                     ));
                     serde_json::json!({
                         "ok": true, "rrid": out.result.rrid,
+                        "mode":run_mode.label(), "complete":out.complete, "mode_matches":out.mode_matches,
                         "obs_ok": out.obs_ok, "verify": out.detail_ok,
                         "uuid": out.result.uuid,
                         "dist": out.result.total_dis, "dur": out.result.total_time,

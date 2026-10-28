@@ -295,6 +295,8 @@ impl App {
                 match crate::api::model::save_identity(&self.device_buf) {
                     Ok(()) => {
                         self.identity = self.device_buf.clone();
+                        self.run_page.preview_stale = true;
+                        self.run_page.map_fitted = false;
                         self.status = "√ 设备身份已保存并生效".into();
                         self.log.push("√  已更新（新设备 ID 从下个请求开始生效）");
                         page.saved_flash = 2.0;

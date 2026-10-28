@@ -12,6 +12,7 @@ pub mod ai;
 pub mod data;
 pub mod device;
 pub mod fonts;
+mod free_preview;
 pub mod jobs;
 pub mod log;
 pub mod map;
@@ -347,6 +348,8 @@ impl App {
             ai_confirm: None,
             tab: 0,
             run_page: run::RunPage {
+                run_mode: config.run_mode,
+                free_preview: Default::default(),
                 dist_min: config.dist_min,
                 dist_max: config.dist_max,
                 pace_min: config.pace_min,

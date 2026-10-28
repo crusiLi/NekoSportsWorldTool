@@ -97,6 +97,9 @@ impl App {
                     self.log
                         .push(&format!("[osm] 路网加载成功：{nodes} 节点 / {bld} 建筑"));
                     self.network = Some(net);
+                    self.run_page.free_preview.invalidate();
+                    self.run_page.preview = None;
+                    self.run_page.map_fitted = false;
                     self.run_page.preview_stale = true;
                 }
                 Err(e) => {
@@ -166,9 +169,20 @@ impl App {
             let val: serde_json::Value = serde_json::from_str(&v).unwrap_or_default();
             if val.get("ok").and_then(|b| b.as_bool()).unwrap_or(false) {
                 self.status = format!(
-                    "跑步提交成功 rrid={}（OBS {}/2）",
+                    "{}已提交 rrid={}（OBS {}/2；达标{}；类型{}）",
+                    val["mode"].as_str().unwrap_or("跑步"),
                     val["rrid"].as_i64().unwrap_or(0),
-                    val["obs_ok"].as_i64().unwrap_or(0)
+                    val["obs_ok"].as_i64().unwrap_or(0),
+                    match val["complete"].as_bool() {
+                        Some(true) => "是",
+                        Some(false) => "否",
+                        None => "待确认",
+                    },
+                    match val["mode_matches"].as_bool() {
+                        Some(true) => "匹配",
+                        Some(false) => "不匹配",
+                        None => "待确认",
+                    }
                 );
                 self.popup = Some(run_popup(&val));
                 self.refresh_data_page();
@@ -397,6 +411,25 @@ fn run_popup(v: &serde_json::Value) -> PopupInfo {
         0.0
     };
     let mut lines = vec![
+        format!(
+            "模式：{}；详情{}；达标{}；类型{}",
+            v["mode"].as_str().unwrap_or("校园跑"),
+            if v["verify"].as_bool() == Some(true) {
+                "已获取"
+            } else {
+                "未获取"
+            },
+            match v["complete"].as_bool() {
+                Some(true) => "是",
+                Some(false) => "否",
+                None => "待确认",
+            },
+            match v["mode_matches"].as_bool() {
+                Some(true) => "匹配",
+                Some(false) => "不匹配",
+                None => "待确认",
+            }
+        ),
         format!("记录号：{}", v["rrid"].as_i64().unwrap_or(0)),
         format!("UUID：{}", v["uuid"].as_str().unwrap_or("")),
         format!(

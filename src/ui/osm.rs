@@ -35,7 +35,7 @@ impl App {
             #[cfg(not(target_os = "android"))]
             if ui.button("浏览…").clicked() {
                 if let Some(p) = rfd::FileDialog::new()
-                    .add_filter("OSM", &["osm", "xml", "pbf"])
+                    .add_filter("OSM", &["osm", "xml"])
                     .pick_file()
                 {
                     self.osm_page.path = p.display().to_string();
@@ -161,6 +161,10 @@ impl App {
     pub fn load_osm_async(&mut self, path: String) {
         self.osm_page.path = path.clone();
         self.osm_page.busy = true;
+        self.network = None;
+        self.run_page.preview = None;
+        self.run_page.preview_stale = true;
+        self.run_page.free_preview.invalidate();
         self.osm_page.status = format!("加载中：{path} …");
         self.config.osm_path = path.clone();
         let _ = crate::api::model::save_config(&self.config);
