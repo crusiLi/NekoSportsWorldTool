@@ -50,7 +50,18 @@ pub fn build(
             )?
         }
         RouteMode::Custom => {
-            return Err("自由跑目前支持自由环线和沿真实道路，请切换路线算法".into())
+            let snapshot = params
+                .free_custom_route
+                .as_ref()
+                .ok_or("请先获取高德路线并完成预览")?;
+            if params.custom.as_ref() != Some(&snapshot.spec) {
+                return Err("高德路线设置已改变，请重新获取路线".into());
+            }
+            snapshot.plan(params.dist, params.dur, params.seed)?.build(
+                params.seed,
+                params.start_ms,
+                params.track_color_mode,
+            )?
         }
     };
     if let Some(range) = params.manual_altitude_range {
@@ -68,12 +79,40 @@ pub fn run(
     log: &mut dyn FnMut(&str),
 ) -> Result<RunOutcome, String> {
     let sess = client.login.clone().ok_or("未登录")?;
-    if client.identity.has_unconfigured_default_location() {
+    let mut effective = params.clone();
+    if effective.route_mode == RouteMode::Custom && effective.free_custom_route.is_none() {
+        let spec = effective
+            .custom
+            .as_ref()
+            .filter(|s| s.is_valid())
+            .ok_or("请填写高德起点与终点")?;
+        let ring = crate::amap::fetch_free_custom_ring(spec, &effective.amap_key)?;
+        effective.free_custom_route =
+            Some(std::sync::Arc::new(crate::track::free_custom::Snapshot {
+                spec: spec.clone(),
+                ring,
+            }));
+    }
+    let params = &effective;
+    if params.route_mode != RouteMode::Custom && client.identity.has_unconfigured_default_location()
+    {
         return Err("请先设置城市和自由跑位置".into());
     }
-    let anchor = client.identity.anchor_coordinate()?;
+    let anchor = if params.route_mode == RouteMode::Custom {
+        let first = params
+            .free_custom_route
+            .as_ref()
+            .and_then(|s| s.ring.points_bd.first())
+            .ok_or("高德路线为空")?;
+        crate::location::Coordinate::new(first.0, first.1, 0.)?
+    } else {
+        client.identity.anchor_coordinate()?
+    };
     // Build first. A routing failure must never silently submit a classic loop.
     let track = build(params, anchor)?;
+    if track.startTime + track.totalTime * 1000 > crate::crypto::envelope::now_ms() {
+        return Err("实际路线用时超出当前时刻，请把开始时间提前或减少圈数".into());
+    }
     log("[自由跑] 不读取学校打卡点或校园围栏；拉取自由跑策略…");
     let pol = super::policy::fetch_policy_for_mode(client, params.run_mode)?;
     if track.totalTime > pol.valid_time && pol.valid_time > 0 {

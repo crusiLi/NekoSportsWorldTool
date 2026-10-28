@@ -22,6 +22,7 @@ use serde_json::{json, Value};
 pub struct RunParams {
     pub run_mode: super::run_mode::RunMode,
     pub free_road_plan: Option<std::sync::Arc<crate::track::free::RoadLoop>>,
+    pub free_custom_route: Option<std::sync::Arc<crate::track::free_custom::Snapshot>>,
     /// 距离（米）与时长（秒）已由 UI 参数解析。
     pub dist: f64,
     pub dur: i64,
@@ -757,6 +758,7 @@ mod tests {
         RunParams {
             run_mode: Default::default(),
             free_road_plan: None,
+            free_custom_route: None,
             dist: 2_000.0,
             dur: 800,
             start_ms: 1_700_000_000_000,
@@ -771,6 +773,36 @@ mod tests {
             custom: None,
             amap_key: String::new(),
         }
+    }
+
+    #[test]
+    fn pinned_amap_free_run_is_offline_and_has_no_school_points() {
+        let mut p = params();
+        p.run_mode = crate::api::run_mode::RunMode::Free;
+        p.route_mode = RouteMode::Custom;
+        let spec = crate::track::custom::CustomRouteSpec {
+            origin: "fixture-a".into(),
+            destination: "fixture-b".into(),
+            loop_mode: false,
+            laps: 0,
+        };
+        p.custom = Some(spec.clone());
+        p.free_custom_route = Some(std::sync::Arc::new(crate::track::free_custom::Snapshot {
+            spec,
+            ring: crate::track::custom::CustomRing {
+                points_bd: vec![(39.9, 116.4), (39.9, 116.402), (39.902, 116.402)],
+                leg_length_m: 400.,
+                total_length_m: 400.,
+                loop_mode: false,
+            },
+        }));
+        let anchor = Coordinate::new(39.9, 116.4, 0.).unwrap();
+        let summary = run_dry_run(&p, anchor).unwrap();
+        assert!(summary.distance_m < 500.);
+        p.custom.as_mut().unwrap().destination = "changed".into();
+        assert!(run_dry_run(&p, anchor).is_err());
+        p.free_custom_route = None;
+        assert!(run_dry_run(&p, anchor).is_err());
     }
 
     #[test]
