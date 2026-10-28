@@ -4,7 +4,7 @@
 //! 10s 窗（speed/step_freq）；每 1000m 一圈；五点 fixed_point_json。
 #![allow(non_snake_case)]
 
-use chrono::{Local, TimeZone};
+use chrono::{FixedOffset, TimeZone};
 use flate2::write::GzEncoder;
 use flate2::Compression;
 use serde_json::{json, Value};
@@ -94,6 +94,22 @@ pub fn conv_point(p: &GenPoint, start_ms: i64) -> Value {
         "validDis": round_to(p.validDis, 4),
         "validTime": p.validTime,
     })
+}
+
+/// Free-run record format used by the outdoor-run reference. Coordinates and
+/// time are derived from the same points as the record-level start location.
+pub fn free_gps_points(track: &Track) -> Vec<Value> {
+    track
+        .locations
+        .iter()
+        .map(|p| {
+            json!({
+                "lat": p.gLat, "lon": p.gLng, "time": p.gainTimeMs,
+                "speed": round_to(p.speed, 4), "accuracy": round_to(p.accuracy, 2),
+                "isValid": p.ptype != -1, "steps": p.steps,
+            })
+        })
+        .collect()
 }
 
 /// 五点实体（实时点位 → 跑完态 isPass=true）。
@@ -518,7 +534,8 @@ pub fn build_obs_object_with_area(
 
 /// OBS objectKey（两个都要传）。
 pub fn obs_keys(track: &Track, rrid: i64, uuid: &str) -> Vec<String> {
-    let t0 = Local
+    let t0 = FixedOffset::east_opt(8 * 3600)
+        .expect("valid Beijing offset")
         .timestamp_millis_opt(track.startTime)
         .single()
         .map(|t| t.format("%Y%m%d%H").to_string())
@@ -543,6 +560,9 @@ pub fn build_run_obs_object(
     }
     let mut object = build_obs_object(track, rrid, uuid, uid, points);
     if mode.is_free() {
+        // The free-run reference stores the point array directly. Campus
+        // continues using its existing compressed allLocJson envelope.
+        object["run_data"] = Value::String(gz_json(&Value::Array(free_gps_points(track))));
         object["fixed_point_json"] = Value::String(gz_json(&json!([])));
     }
     Ok(object)
