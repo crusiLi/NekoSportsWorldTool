@@ -10,6 +10,7 @@ use std::{
 type Reply = (String, Result<Arc<RoadLoop>, String>);
 #[derive(Default)]
 pub struct State {
+    revision: u64,
     key: String,
     changed: Option<Instant>,
     rx: Option<Receiver<Reply>>,
@@ -18,6 +19,7 @@ pub struct State {
 }
 impl State {
     pub fn invalidate(&mut self) {
+        self.revision = self.revision.wrapping_add(1);
         self.key.clear();
         self.road = None;
         self.changed = None;
@@ -33,7 +35,12 @@ impl State {
         seed: u64,
         ctx: &egui::Context,
     ) -> bool {
-        let key = format!("{:p}:{:?}:{dist}:{seed}", Arc::as_ptr(&net), anchor);
+        let key = format!(
+            "{}:{:p}:{:?}:{dist}:{seed}",
+            self.revision,
+            Arc::as_ptr(&net),
+            anchor
+        );
         if self.key != key {
             self.key = key.clone();
             self.changed = Some(Instant::now());
@@ -89,5 +96,26 @@ impl State {
             ctx.request_repaint_after(Duration::from_millis(100));
         }
         updated
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn reload_discards_queued_reply_even_when_other_inputs_are_identical() {
+        let net = Arc::new(route_planner::RoadGraph::new());
+        let anchor = Coordinate::new(39.9, 116.4, 0.).unwrap();
+        let ctx = egui::Context::default();
+        let mut state = State::default();
+        state.update(net.clone(), anchor, 2000., 42, &ctx);
+        let old_key = state.key.clone();
+        let (tx, rx) = mpsc::channel();
+        tx.send((old_key, Err("obsolete network".into()))).unwrap();
+        state.rx = Some(rx);
+        state.invalidate();
+        assert!(!state.update(net, anchor, 2000., 42, &ctx));
+        assert!(!state.status.contains("obsolete"));
+        assert!(!state.ready());
     }
 }
