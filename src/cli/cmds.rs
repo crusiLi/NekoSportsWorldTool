@@ -235,6 +235,7 @@ fn cmd_run(rest: &[&str]) -> i32 {
     let params = crate::api::flow::RunParams {
         run_mode,
         free_road_plan: None,
+        free_custom_route: None,
         dist,
         dur,
         start_ms,
