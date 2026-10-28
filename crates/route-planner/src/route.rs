@@ -281,7 +281,12 @@ pub fn plan_loop(
             &mut rng,
             opts,
         );
-        if path.len() < 2 {
+        if path.len() < 3
+            || path.last() != Some(&start)
+            || path
+                .windows(2)
+                .any(|w| g.graph.find_edge(w[0], w[1]).is_none())
+        {
             continue;
         }
         let (repeats, len) = repeat_cost(g, &path);
