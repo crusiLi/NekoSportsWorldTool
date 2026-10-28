@@ -7,8 +7,8 @@ use crate::crypto::decrypt::{decrypt_response, derive_paes_key};
 use crate::crypto::envelope::{build_envelope, build_envelope_ts, rsa_public_key, OuterOrder};
 use crate::crypto::header::{build_android_header, HeaderIdentity, UA_ANDROID};
 use crate::crypto::sign::{original_sign, signature};
-use crate::track::calorie::{avg_power, official_kcal};
 use crate::track::altitude;
+use crate::track::calorie::{avg_power, official_kcal};
 use crate::track::geom::round_to;
 use crate::track::model::{GenPoint, Track};
 use crate::track::wire::validate_five_point_wrapper;
@@ -17,28 +17,37 @@ use serde_json::{json, Map, Value};
 pub const RECORD_PATH: &str = "/api/v70260/runnings/save/record";
 
 /// Android 10s 窗（id 种子 60000）。
-fn android_tensec(track: &Track, start_ms: i64, kind: &str) -> Vec<Value> {
+fn android_tensec(track: &Track, start_ms: i64, kind: &str, canonical: bool) -> Vec<Value> {
     let locs = &track.locations;
     let total_time = track.totalTime;
     let mut out = Vec::new();
     let rid_seed = 60000i64;
     let mut w = 10i64;
-    while w <= total_time {
+    while if canonical {
+        w - 10 < total_time
+    } else {
+        w <= total_time
+    } {
         let lo = w - 10;
         let hi = w.min(total_time);
         let mut d_lo = 0.0f64;
         let mut s_lo = 0i64;
         let mut d_hi = 0.0f64;
         let mut s_hi = 0i64;
-        for p in locs {
-            let tt = p.totalTime;
-            if tt <= lo {
-                d_lo = p.totalDis;
-                s_lo = p.steps;
-            }
-            if tt <= hi {
-                d_hi = p.totalDis;
-                s_hi = p.steps;
+        if canonical {
+            (d_lo, s_lo) = crate::track::stats::counters_at(locs, lo);
+            (d_hi, s_hi) = crate::track::stats::counters_at(locs, hi);
+        } else {
+            for p in locs {
+                let tt = p.totalTime;
+                if tt <= lo {
+                    d_lo = p.totalDis;
+                    s_lo = p.steps;
+                }
+                if tt <= hi {
+                    d_hi = p.totalDis;
+                    s_hi = p.steps;
+                }
             }
         }
         let dist = round_to((d_hi - d_lo).max(0.0), 4);
@@ -77,6 +86,7 @@ pub fn pace_speed_value(total_time_s: i64, distance_m: f64) -> i64 {
 }
 
 pub struct SubmitParams {
+    pub run_mode: super::run_mode::RunMode,
     pub track: Track,
     pub uid: i64,
     pub selected_unid: i64,
@@ -104,18 +114,23 @@ pub struct SubmitResult {
     pub sel_distance: i64,
 }
 
-/// 提交跑步记录（sportType=1 自由跑 + 实时五点）。
-pub fn submit_record(
-    client: &mut ApiClient,
+pub(crate) fn prepare_record(
     p: &SubmitParams,
-    log: &mut dyn FnMut(&str),
-) -> Result<SubmitResult, String> {
+    run_uuid: String,
+) -> Result<(Value, SubmitResult), String> {
     let track = &p.track;
     let start_coordinate = track.validate_consistency()?;
     if p.five_point_json.is_empty() {
         return Err("五点轨迹不能为空".into());
     }
-    validate_five_point_wrapper(&p.five_point_json)?;
+    if p.run_mode.is_free() {
+        let points: Value = serde_json::from_str(&p.five_point_json).map_err(|e| e.to_string())?;
+        if points != json!([]) {
+            return Err("自由跑不应携带必经打卡点".into());
+        }
+    } else {
+        validate_five_point_wrapper(&p.five_point_json)?;
+    }
     let total_time = track.totalTime;
     let total_dis = track.totalDistance;
     let total_steps = track.totalSteps;
@@ -125,7 +140,6 @@ pub fn submit_record(
     let power = avg_power(p.weight, total_dis, total_time);
     let kcal = official_kcal(p.weight, total_time, total_dis);
 
-    let run_uuid = uuid::Uuid::new_v4().to_string().to_uppercase();
     let unid = p.selected_unid;
 
     let speed = pace_speed_value(total_time, total_dis);
@@ -133,7 +147,7 @@ pub fn submit_record(
 
     let mut body = Map::new();
     body.insert("allLocJson".into(), Value::String(String::new()));
-    body.insert("sportType".into(), Value::from(1));
+    body.insert("sportType".into(), Value::from(p.run_mode.sport_type()));
     body.insert("policy".into(), Value::from(p.policy));
     body.insert("totalTime".into(), Value::from(total_time));
     body.insert("startTime".into(), Value::from(start_ms));
@@ -169,11 +183,21 @@ pub fn submit_record(
     body.insert("avgPower".into(), Value::from(power));
     body.insert(
         "speedPerTenSec".into(),
-        Value::Array(android_tensec(track, start_ms, "speed")),
+        Value::Array(android_tensec(
+            track,
+            start_ms,
+            "speed",
+            p.run_mode.is_free(),
+        )),
     );
     body.insert(
         "stepsPerTenSec".into(),
-        Value::Array(android_tensec(track, start_ms, "steps")),
+        Value::Array(android_tensec(
+            track,
+            start_ms,
+            "steps",
+            p.run_mode.is_free(),
+        )),
     );
     body.insert("isUpload".into(), Value::Bool(false));
     body.insert("more".into(), Value::Bool(false));
@@ -203,8 +227,31 @@ pub fn submit_record(
     let orig = original_sign(&body_val, false);
     body.insert("signature".into(), Value::String(sig));
     body.insert("originalSign".into(), Value::String(orig));
-    let body_plain = Value::Object(body).to_string();
+    let result = SubmitResult {
+        rrid: 0,
+        uuid: run_uuid,
+        start_ms,
+        complete: None,
+        total_dis,
+        total_time,
+        total_steps,
+        avg_step_freq,
+        calorie: kcal,
+        avg_power: power,
+        sel_distance: p.min_distance,
+    };
+    Ok((Value::Object(body), result))
+}
 
+pub fn submit_record(
+    client: &mut ApiClient,
+    p: &SubmitParams,
+    log: &mut dyn FnMut(&str),
+) -> Result<SubmitResult, String> {
+    let run_uuid = uuid::Uuid::new_v4().to_string().to_uppercase();
+    let (body, mut result) = prepare_record(p, run_uuid.clone())?;
+    let start_ms = result.start_ms;
+    let body_plain = body.to_string();
     let device_id = if client.identity.device_id.is_empty() {
         uuid::Uuid::new_v4().to_string().to_uppercase()
     } else {
@@ -245,7 +292,8 @@ pub fn submit_record(
     let status = resp.status();
     let raw = resp.into_string().unwrap_or_default();
     log(&format!(
-        "[record] sportType=1 HTTP {status} len={}",
+        "[record] sportType={} HTTP {status} len={}",
+        p.run_mode.sport_type(),
         raw.len()
     ));
 
@@ -265,19 +313,9 @@ pub fn submit_record(
         return Err(format!("提交未返回 rrid: {}", truncate_json(&biz)));
     }
     log(&format!("√ 提交成功 rrid={rrid} uuid={run_uuid}"));
-    Ok(SubmitResult {
-        rrid,
-        uuid: run_uuid,
-        start_ms,
-        complete: super::client::get_field(&biz, "complete").and_then(|v| v.as_bool()),
-        total_dis,
-        total_time,
-        total_steps,
-        avg_step_freq,
-        calorie: kcal,
-        avg_power: power,
-        sel_distance: p.min_distance,
-    })
+    result.rrid = rrid;
+    result.complete = super::client::get_field(&biz, "complete").and_then(Value::as_bool);
+    Ok(result)
 }
 
 #[cfg(test)]
@@ -301,4 +339,146 @@ fn client_token(client: &ApiClient) -> String {
 fn truncate_json(v: &Value) -> String {
     let s = v.to_string();
     s.chars().take(240).collect()
+}
+
+#[cfg(test)]
+mod mode_tests {
+    use super::*;
+    use crate::api::run_mode::RunMode;
+
+    fn params(mode: RunMode) -> SubmitParams {
+        SubmitParams {
+            run_mode: mode,
+            track: crate::track::free::build_with_color(
+                2000.0,
+                800,
+                42,
+                1_700_000_000_000,
+                crate::location::Coordinate::new(39.9, 116.4, 0.0).unwrap(),
+                crate::api::model::TrackColorMode::FullGreen,
+            )
+            .unwrap(),
+            uid: 123,
+            selected_unid: 456,
+            policy: 1,
+            policy_ts: 1_700_000_000_000,
+            min_distance: 1000,
+            weight: 68.0,
+            face_check: 0,
+            five_point_json: "[]".into(),
+            address: "北京市".into(),
+        }
+    }
+
+    #[test]
+    fn free_mode_is_in_both_signature_inputs_and_the_actual_body() {
+        let p = params(RunMode::Free);
+        let (body, _) = prepare_record(&p, "FIXED-TEST-UUID".into()).unwrap();
+        assert_eq!(body["sportType"], 4);
+        assert_eq!(body["fivePointJson"], "[]");
+        assert!(body["originalSign"]
+            .as_str()
+            .unwrap()
+            .contains("sportType=4&"));
+        assert_eq!(body["signature"].as_str().unwrap(), signature(&body, false));
+        let mut wrong_mode = body.clone();
+        wrong_mode["sportType"] = json!(1);
+        assert_ne!(
+            signature(&wrong_mode, false),
+            body["signature"].as_str().unwrap()
+        );
+    }
+
+    #[test]
+    fn campus_still_requires_real_points_and_free_rejects_them() {
+        let mut p = params(RunMode::Campus);
+        assert!(prepare_record(&p, "TEST".into()).is_err());
+        let points = vec![json!({"lat":39.9,"lon":116.4,"glat":39.894,"glon":116.3935})];
+        p.five_point_json = crate::track::wire::five_point_wrapper(&points, p.track.startTime);
+        let (body, _) = prepare_record(&p, "TEST".into()).unwrap();
+        assert_eq!(body["sportType"], 1);
+        p.run_mode = RunMode::Free;
+        assert!(prepare_record(&p, "TEST".into()).is_err());
+    }
+
+    #[test]
+    fn free_obs_has_no_fabricated_checkpoints() {
+        use base64::Engine;
+        use std::io::Read;
+        let p = params(RunMode::Free);
+        let object = crate::track::wire::build_run_obs_object(
+            &p.track,
+            123,
+            "TEST",
+            456,
+            &[],
+            RunMode::Free,
+        )
+        .unwrap();
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(object["fixed_point_json"].as_str().unwrap())
+            .unwrap();
+        let mut decoded = String::new();
+        flate2::read::GzDecoder::new(bytes.as_slice())
+            .read_to_string(&mut decoded)
+            .unwrap();
+        assert_eq!(serde_json::from_str::<Value>(&decoded).unwrap(), json!([]));
+        assert!(crate::track::wire::build_run_obs_object(
+            &p.track,
+            123,
+            "TEST",
+            456,
+            &[json!({})],
+            RunMode::Free
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn free_body_and_obs_statistics_include_the_partial_tail() {
+        let mut p = params(RunMode::Free);
+        p.track = crate::track::free::build_with_color(
+            2000.,
+            803,
+            42,
+            1_700_000_000_000,
+            crate::location::Coordinate::new(39.9, 116.4, 0.).unwrap(),
+            crate::api::model::TrackColorMode::FullGreen,
+        )
+        .unwrap();
+        // Final samples are the canonical source, including t=0.
+        let mut first = p.track.locations[0].clone();
+        first.totalTime = 0;
+        first.totalDis = 0.;
+        first.steps = 0;
+        first.validTime = 0;
+        first.validDis = 0.;
+        p.track.locations.insert(0, first);
+        crate::track::stats::rebuild(&mut p.track);
+        let (body, _) = prepare_record(&p, "TAIL".into()).unwrap();
+        let speed = body["speedPerTenSec"].as_array().unwrap();
+        let steps = body["stepsPerTenSec"].as_array().unwrap();
+        assert_eq!(speed.len(), 81);
+        assert_eq!(steps.len(), 81);
+        assert_eq!(
+            speed.last().unwrap()["endTime"],
+            p.track.startTime + 803_000
+        );
+        assert!(
+            (speed
+                .iter()
+                .map(|w| w["distance"].as_f64().unwrap())
+                .sum::<f64>()
+                - p.track.totalDistance)
+                .abs()
+                < 0.01
+        );
+        assert_eq!(
+            steps
+                .iter()
+                .map(|w| w["stepsNum"].as_i64().unwrap())
+                .sum::<i64>(),
+            p.track.totalSteps
+        );
+    }
 }

@@ -20,6 +20,8 @@ use serde_json::{json, Value};
 
 #[derive(Clone)]
 pub struct RunParams {
+    pub run_mode: super::run_mode::RunMode,
+    pub free_road_plan: Option<std::sync::Arc<crate::track::free::RoadLoop>>,
     /// 距离（米）与时长（秒）已由 UI 参数解析。
     pub dist: f64,
     pub dur: i64,
@@ -49,6 +51,8 @@ pub struct RunOutcome {
     pub result: SubmitResult,
     pub obs_ok: usize,
     pub detail_ok: bool,
+    pub complete: Option<bool>,
+    pub mode_matches: Option<bool>,
 }
 
 /// 本地 dry-run 的摘要；不会读取会话、访问网络或上传任何数据。
@@ -92,6 +96,41 @@ fn dry_run_points(anchor: Coordinate) -> Vec<Value> {
 /// 构造并校验一条完整本地记录，不创建 ApiClient，也不触发任何网络请求。
 pub fn run_dry_run(params: &RunParams, anchor: Coordinate) -> Result<DryRunSummary, String> {
     anchor.validate()?;
+    if params.start_ms <= 0 {
+        return Err("dry-run 开始时间无效".into());
+    }
+    if params.run_mode.is_free() {
+        let track = super::free_flow::build(params, anchor)?;
+        let obj = crate::track::wire::build_run_obs_object(
+            &track,
+            1,
+            "DRY-RUN",
+            1,
+            &[],
+            params.run_mode,
+        )?;
+        if obj.as_object().map(|o| o.len()) != Some(10) {
+            return Err("OBS 对象键数无效".into());
+        }
+        return Ok(DryRunSummary {
+            distance_m: track.totalDistance,
+            duration_s: track.totalTime,
+            track_points: track.locations.len(),
+            obs_keys: 2,
+            start_latitude: track.startLatitude,
+            start_longitude: track.startLongitude,
+            min_speed_mps: track
+                .locations
+                .iter()
+                .map(|p| p.avgSpeed)
+                .fold(f64::INFINITY, f64::min),
+            max_speed_mps: track
+                .locations
+                .iter()
+                .map(|p| p.avgSpeed)
+                .fold(0., f64::max),
+        });
+    }
     if params.dist <= 0.0 || !params.dist.is_finite() {
         return Err("dry-run 距离必须是正数".into());
     }
@@ -204,6 +243,12 @@ pub fn run_full_flow(
     params: &RunParams,
     log: &mut dyn FnMut(&str),
 ) -> Result<RunOutcome, String> {
+    if let Ok(mut slot) = VERIFY_DETAIL.lock() {
+        *slot = None;
+    }
+    if params.run_mode.is_free() {
+        return super::free_flow::run(client, params, log);
+    }
     let sess: Session = client.login.clone().ok_or("未登录")?;
 
     // ① policy
@@ -288,8 +333,12 @@ pub fn run_full_flow(
         }
     }
     let ordinary = points::points_free(&pts);
-    let route_pts =
-        crate::track::generate_road::select_route_points(&fixed, &ordinary, params.seed, params.ordinary_pick);
+    let route_pts = crate::track::generate_road::select_route_points(
+        &fixed,
+        &ordinary,
+        params.seed,
+        params.ordinary_pick,
+    );
     let picked = route_pts.len().saturating_sub(fixed.len());
     log(&format!(
         "√ [track] 硬点 {} 个（必经 {} + 随机普通 {}），普通点 {} 个（未选 {}）",
@@ -377,7 +426,10 @@ pub fn run_full_flow(
     // 随机 0-4 秒偏移（终端上报的 flag 与首点差 <5s），轨迹/提交/OBS/五点统一使用
     let start_ms = params.start_ms + (rand::random::<i64>() % 5) * 1000;
     let mut track = if params.track_spec != crate::track::stadium::TrackSpec::Auto {
-        log(&format!("[track] 使用{}操场模式", params.track_spec.label()));
+        log(&format!(
+            "[track] 使用{}操场模式",
+            params.track_spec.label()
+        ));
         crate::track::generator::build_stadium(
             params.dist,
             params.dur,
@@ -389,81 +441,108 @@ pub fn run_full_flow(
         )?
     } else {
         match params.route_mode {
-        RouteMode::Road => {
-            let cfg = crate::api::model::load_config();
-            if cfg.osm_path.is_empty() {
-                log("⚠ [track] 未配置 OSM 路网，回退经典算法");
-                gen_track(
-                    params.dist,
-                    params.dur,
-                    params.seed,
-                    (anchor.latitude, anchor.longitude),
-                    start_ms,
-                    &pts_bd,
-                    params.track_color_mode,
-                )
-            } else {
-                match crate::track::generate_road::load_network_path(&cfg.osm_path) {
-                    Ok(mut net) => {
-                        crate::track::generate_road::align_network(&mut net);
-                        // 电子围栏：裁剪到围栏内道路（失败/无围栏则跳过）
-                        let fences = match prefetched_fences.take() {
-                            Some(f) => {
-                                let _ = crate::api::model::save_fence_cache(&f);
-                                log(&format!("√ [track] 电子围栏 {} 个", f.len()));
-                                f
-                            }
-                            None => match crate::api::fence::fetch_geo_fence(client) {
-                                Ok(f) => {
+            RouteMode::Road => {
+                let cfg = crate::api::model::load_config();
+                if cfg.osm_path.is_empty() {
+                    log("⚠ [track] 未配置 OSM 路网，回退经典算法");
+                    gen_track(
+                        params.dist,
+                        params.dur,
+                        params.seed,
+                        (anchor.latitude, anchor.longitude),
+                        start_ms,
+                        &pts_bd,
+                        params.track_color_mode,
+                    )
+                } else {
+                    match crate::track::generate_road::load_network_path(&cfg.osm_path) {
+                        Ok(mut net) => {
+                            crate::track::generate_road::align_network(&mut net);
+                            // 电子围栏：裁剪到围栏内道路（失败/无围栏则跳过）
+                            let fences = match prefetched_fences.take() {
+                                Some(f) => {
                                     let _ = crate::api::model::save_fence_cache(&f);
                                     log(&format!("√ [track] 电子围栏 {} 个", f.len()));
                                     f
                                 }
-                                Err(e) => {
-                                    log(&format!("⚠ [track] 围栏获取失败，回退缓存: {e}"));
-                                    crate::api::model::load_fence_cache().unwrap_or_default()
+                                None => match crate::api::fence::fetch_geo_fence(client) {
+                                    Ok(f) => {
+                                        let _ = crate::api::model::save_fence_cache(&f);
+                                        log(&format!("√ [track] 电子围栏 {} 个", f.len()));
+                                        f
+                                    }
+                                    Err(e) => {
+                                        log(&format!("⚠ [track] 围栏获取失败，回退缓存: {e}"));
+                                        crate::api::model::load_fence_cache().unwrap_or_default()
+                                    }
+                                },
+                            };
+                            let filtered = crate::track::generate_road::apply_fences(&net, &fences);
+                            // 硬点（不含起点）：必经点 + 随机普通点，全部强经过 + <40m 吸附
+                            let must_bd: Vec<(f64, f64)> =
+                                route_pts.iter().skip(1).copied().collect();
+                            match crate::track::generate_road::build_road_with_color_mode(
+                                params.dist,
+                                params.dur,
+                                params.seed,
+                                start_ms,
+                                &route_pts,
+                                &must_bd,
+                                &filtered,
+                                params.track_color_mode,
+                            ) {
+                                Ok(t) => {
+                                    log(&format!(
+                                        "√ [track] 真实道路路由 {} 点 / {} 建筑 / {} 围栏",
+                                        t.locations.len(),
+                                        filtered.buildings.len(),
+                                        fences.len()
+                                    ));
+                                    t
                                 }
-                            },
-                        };
-                        let filtered = crate::track::generate_road::apply_fences(&net, &fences);
-                        // 硬点（不含起点）：必经点 + 随机普通点，全部强经过 + <40m 吸附
-                        let must_bd: Vec<(f64, f64)> =
-                            route_pts.iter().skip(1).copied().collect();
-                        match crate::track::generate_road::build_road_with_color_mode(
-                            params.dist,
-                            params.dur,
-                            params.seed,
-                            start_ms,
-                            &route_pts,
-                            &must_bd,
-                            &filtered,
-                            params.track_color_mode,
-                        ) {
-                            Ok(t) => {
-                                log(&format!(
-                                    "√ [track] 真实道路路由 {} 点 / {} 建筑 / {} 围栏",
-                                    t.locations.len(),
-                                    filtered.buildings.len(),
-                                    fences.len()
-                                ));
-                                t
-                            }
-                            Err(e) => {
-                                log(&format!("⚠ [track] 道路路由失败，回退经典算法: {e}"));
-                                gen_track(
-                                    params.dist,
-                                    params.dur,
-                                    params.seed,
-                                    (anchor.latitude, anchor.longitude),
-                                    start_ms,
-                                    &pts_bd,
-                                    params.track_color_mode,
-                                )
+                                Err(e) => {
+                                    log(&format!("⚠ [track] 道路路由失败，回退经典算法: {e}"));
+                                    gen_track(
+                                        params.dist,
+                                        params.dur,
+                                        params.seed,
+                                        (anchor.latitude, anchor.longitude),
+                                        start_ms,
+                                        &pts_bd,
+                                        params.track_color_mode,
+                                    )
+                                }
                             }
                         }
+                        Err(e) => {
+                            log(&format!("⚠ [track] 路网加载失败，回退经典算法: {e}"));
+                            gen_track(
+                                params.dist,
+                                params.dur,
+                                params.seed,
+                                (anchor.latitude, anchor.longitude),
+                                start_ms,
+                                &pts_bd,
+                                params.track_color_mode,
+                            )
+                        }
                     }
+                }
+            }
+            RouteMode::Legacy => gen_track(
+                params.dist,
+                params.dur,
+                params.seed,
+                (anchor.latitude, anchor.longitude),
+                start_ms,
+                &pts_bd,
+                params.track_color_mode,
+            ),
+            RouteMode::Custom => {
+                match build_custom_track(&params, &pol.must_points, &pts_bd, start_ms, log) {
+                    Ok(t) => t,
                     Err(e) => {
-                        log(&format!("⚠ [track] 路网加载失败，回退经典算法: {e}"));
+                        log(&format!("⚠ [track] 自定义路线失败，回退经典算法: {e}"));
                         gen_track(
                             params.dist,
                             params.dur,
@@ -477,31 +556,7 @@ pub fn run_full_flow(
                 }
             }
         }
-        RouteMode::Legacy => gen_track(
-            params.dist,
-            params.dur,
-            params.seed,
-            (anchor.latitude, anchor.longitude),
-            start_ms,
-            &pts_bd,
-            params.track_color_mode,
-        ),
-        RouteMode::Custom => match build_custom_track(&params, &pol.must_points, &pts_bd, start_ms, log) {
-            Ok(t) => t,
-            Err(e) => {
-                log(&format!("⚠ [track] 自定义路线失败，回退经典算法: {e}"));
-                gen_track(
-                    params.dist,
-                    params.dur,
-                    params.seed,
-                    (anchor.latitude, anchor.longitude),
-                    start_ms,
-                    &pts_bd,
-                    params.track_color_mode,
-                )
-            }
-        }
-    }};
+    };
     if let Some(range) = params.manual_altitude_range {
         crate::track::altitude::override_bd_a_range(&mut track, range)?;
         log(&format!(
@@ -537,6 +592,7 @@ pub fn run_full_flow(
     // ⑤ 提交（sportType=1）
     log("[record] 提交跑步记录（sportType=1）…");
     let sp = SubmitParams {
+        run_mode: params.run_mode,
         track,
         uid: sess.uid,
         selected_unid: sess.unid.parse().unwrap_or(0),
@@ -557,7 +613,12 @@ pub fn run_full_flow(
     let mut track_for_obs = sp.track.clone();
     track_for_obs.startTime = result.start_ms;
     let obj = build_obs_object_with_area(
-        &track_for_obs, result.rrid, &result.uuid, sess.uid, &submitted_pts, &area,
+        &track_for_obs,
+        result.rrid,
+        &result.uuid,
+        sess.uid,
+        &submitted_pts,
+        &area,
     );
     let payload = obj.to_string().into_bytes();
     let keys = obs_keys(&track_for_obs, result.rrid, &result.uuid);
@@ -571,8 +632,15 @@ pub fn run_full_flow(
     // ⑦ 详情验证
     sleep_secs(2);
     log("[verify] 拉取详情验证…");
+    let mut complete = None;
+    let mut mode_matches = None;
     let detail_ok = match fetch_one_record(client, result.rrid) {
         Ok(d) => {
+            complete = d.get("complete").and_then(Value::as_bool);
+            mode_matches = d
+                .get("sportType")
+                .and_then(Value::as_i64)
+                .map(|t| t == params.run_mode.sport_type());
             log(&format!(
                 "√ [verify] rrid={} complete={:?} dis={:?} time={:?}",
                 result.rrid,
@@ -597,6 +665,8 @@ pub fn run_full_flow(
         result,
         obs_ok,
         detail_ok,
+        complete,
+        mode_matches,
     })
 }
 
@@ -613,10 +683,7 @@ fn build_custom_track(
         .as_ref()
         .filter(|s| s.is_valid())
         .ok_or("自定义路线缺少起点/终点")?;
-    let key = params
-        .amap_key
-        .trim()
-        .to_string();
+    let key = params.amap_key.trim().to_string();
     let ring = crate::amap::fetch_custom_ring(spec, &key)?;
     log(&format!(
         "√ [track] 高德路线：去程 {:.0} m · 闭环 {:.0} m · {} 点（{}）",
@@ -627,8 +694,12 @@ fn build_custom_track(
     ));
     let (d_eff, dur_eff, note) =
         crate::track::custom::effective_dist_dur(spec, &ring, params.dist, params.dur)?;
-    log(&format!("[track] {note} → 距离 {:.0} m / {dur_eff}s", d_eff));
-    let track = crate::track::custom::build_custom(d_eff, dur_eff, params.seed, start_ms, &ring, pts_bd);
+    log(&format!(
+        "[track] {note} → 距离 {:.0} m / {dur_eff}s",
+        d_eff
+    ));
+    let track =
+        crate::track::custom::build_custom(d_eff, dur_eff, params.seed, start_ms, &ring, pts_bd);
     // 必经点告警：自定义路线不强制改道，必经点不在路线附近时提示可能不计成绩
     for (i, &(mlat, mlon)) in must_bd.iter().enumerate() {
         let mut best = f64::INFINITY;
@@ -684,6 +755,8 @@ mod tests {
 
     fn params() -> RunParams {
         RunParams {
+            run_mode: Default::default(),
+            free_road_plan: None,
             dist: 2_000.0,
             dur: 800,
             start_ms: 1_700_000_000_000,

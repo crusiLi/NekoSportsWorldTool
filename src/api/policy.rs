@@ -71,6 +71,13 @@ fn extract_must_points(v: &serde_json::Value) -> Vec<(f64, f64)> {
 
 /// body：{"runMode":1,"ruleUpdateTime":0,"geoFenceUpdateTime":0,"selectUnid":<unid>,"operateType":0}
 pub fn fetch_policy(client: &mut ApiClient) -> Result<PolicyInfo, String> {
+    fetch_policy_for_mode(client, super::run_mode::RunMode::Campus)
+}
+
+pub fn fetch_policy_for_mode(
+    client: &mut ApiClient,
+    mode: super::run_mode::RunMode,
+) -> Result<PolicyInfo, String> {
     let unid = client
         .login
         .as_ref()
@@ -78,7 +85,7 @@ pub fn fetch_policy(client: &mut ApiClient) -> Result<PolicyInfo, String> {
         .unwrap_or_default();
     let select_unid = unid.parse::<i64>().unwrap_or(0);
     let body = json!({
-        "runMode": 1,
+        "runMode": mode.sport_type(),
         "ruleUpdateTime": 0,
         "geoFenceUpdateTime": 0,
         "selectUnid": select_unid,
