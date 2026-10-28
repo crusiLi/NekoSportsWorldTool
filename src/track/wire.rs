@@ -207,7 +207,11 @@ fn validate_fence_metadata(outer: &Value) -> Result<(), String> {
 #[cfg(test)]
 mod validation_tests {
     use super::*;
-    #[test] fn rejects_empty_or_malformed_five_point_payload() { assert!(validate_five_point_wrapper("{}").is_err()); assert!(validate_five_point_wrapper(r#"{"fivePointJson":"[]"}"#).is_err()); }
+    #[test]
+    fn rejects_empty_or_malformed_five_point_payload() {
+        assert!(validate_five_point_wrapper("{}").is_err());
+        assert!(validate_five_point_wrapper(r#"{"fivePointJson":"[]"}"#).is_err());
+    }
 
     fn five_point_wrapper_without_fence_fields() -> Value {
         json!({
@@ -299,8 +303,16 @@ mod validation_tests {
 
     #[test]
     fn area_metadata_is_written_to_fixed_point_wrapper() {
-        let area = RunAreaMeta { run_area_id: 42, geo_fences_json: "[{\"x\":1}]".into(), freedom_show_fence: true };
-        let wrapper = five_point_wrapper_with_area(&[json!({"lat": 39.9, "lon": 116.4, "glat": 39.9, "glon": 116.4})], 1_700_000_000_000, &area);
+        let area = RunAreaMeta {
+            run_area_id: 42,
+            geo_fences_json: "[{\"x\":1}]".into(),
+            freedom_show_fence: true,
+        };
+        let wrapper = five_point_wrapper_with_area(
+            &[json!({"lat": 39.9, "lon": 116.4, "glat": 39.9, "glon": 116.4})],
+            1_700_000_000_000,
+            &area,
+        );
         let value: Value = serde_json::from_str(&wrapper).unwrap();
         assert_eq!(value["runAreaId"], 42);
         assert_eq!(value["geoFencesJson"], "[{\"x\":1}]");
@@ -316,7 +328,8 @@ mod validation_tests {
             "glon": 116.4,
             "isFixed": 0,
         })];
-        let value: Value = serde_json::from_str(&five_point_wrapper(&points, 1_700_000_000_000)).unwrap();
+        let value: Value =
+            serde_json::from_str(&five_point_wrapper(&points, 1_700_000_000_000)).unwrap();
         let raw = value["fivePointJson"].as_str().unwrap();
         let fixed: Value = serde_json::from_str(raw).unwrap();
         assert_eq!(fixed[0]["isFixed"], 1);
@@ -516,3 +529,21 @@ pub fn obs_keys(track: &Track, rrid: i64, uuid: &str) -> Vec<String> {
     ]
 }
 
+/// Free-run OBS uses an empty point array, matching its submission body.
+pub fn build_run_obs_object(
+    track: &Track,
+    rrid: i64,
+    uuid: &str,
+    uid: i64,
+    points: &[Value],
+    mode: crate::api::run_mode::RunMode,
+) -> Result<Value, String> {
+    if mode.is_free() && !points.is_empty() {
+        return Err("自由跑 OBS 不应携带必经打卡点".into());
+    }
+    let mut object = build_obs_object(track, rrid, uuid, uid, points);
+    if mode.is_free() {
+        object["fixed_point_json"] = Value::String(gz_json(&json!([])));
+    }
+    Ok(object)
+}

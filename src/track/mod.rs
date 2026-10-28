@@ -3,12 +3,14 @@
 pub mod altitude;
 pub mod calorie;
 pub mod custom;
+pub mod free;
 pub mod generate_road;
 pub mod generator;
 pub mod geom;
 pub mod model;
 pub mod postfix;
 pub mod stadium;
+pub mod stats;
 pub mod wire;
 
 #[cfg(test)]
@@ -108,7 +110,10 @@ mod tests {
                 );
             }
         }
-        assert!(exception_count > 0, "test track should exercise exception points");
+        assert!(
+            exception_count > 0,
+            "test track should exercise exception points"
+        );
     }
 
     /// 选点：必经点全选 + 普通点恰好取 pick 个，seed 可复现，不足则全取。
@@ -134,8 +139,12 @@ mod tests {
         let few = select_route_points(&fixed, &[(9.0, 9.0)], 1, DEFAULT_ORDINARY_PICK);
         assert_eq!(few.len(), 2);
         // fixed 与 ordinary 重叠时去重，不重复
-        let overlap =
-            select_route_points(&[(1.0, 1.0)], &[(1.0, 1.0), (2.0, 2.0)], 7, DEFAULT_ORDINARY_PICK);
+        let overlap = select_route_points(
+            &[(1.0, 1.0)],
+            &[(1.0, 1.0), (2.0, 2.0)],
+            7,
+            DEFAULT_ORDINARY_PICK,
+        );
         assert_eq!(overlap.len(), 2);
     }
 
@@ -255,7 +264,13 @@ mod tests {
         );
         let last = track.locations.len() - 1;
         for (i, point) in track.locations.iter().enumerate() {
-            let expected_type = if i == 1 { 5 } else if i == last { 6 } else { 0 };
+            let expected_type = if i == 1 {
+                5
+            } else if i == last {
+                6
+            } else {
+                0
+            };
             assert_eq!(point.ptype, expected_type);
             assert_eq!(point.locType, 1);
             assert_eq!(point.state, 1);
