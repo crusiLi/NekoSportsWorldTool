@@ -146,7 +146,12 @@ pub(crate) fn prepare_record(
     let avg_step_freq = 1i64.max(round_to(total_steps as f64 / total_time as f64 * 60.0, 0) as i64);
 
     let mut body = Map::new();
-    body.insert("allLocJson".into(), Value::String(String::new()));
+    let locations = if p.run_mode.is_free() {
+        Value::Array(crate::track::wire::free_gps_points(track)).to_string()
+    } else {
+        String::new()
+    };
+    body.insert("allLocJson".into(), Value::String(locations));
     body.insert("sportType".into(), Value::from(p.run_mode.sport_type()));
     body.insert("policy".into(), Value::from(p.policy));
     body.insert("totalTime".into(), Value::from(total_time));
@@ -423,6 +428,24 @@ mod mode_tests {
             .read_to_string(&mut decoded)
             .unwrap();
         assert_eq!(serde_json::from_str::<Value>(&decoded).unwrap(), json!([]));
+        let (body, _) = prepare_record(&p, "TEST".into()).unwrap();
+        let body_points: Value =
+            serde_json::from_str(body["allLocJson"].as_str().unwrap()).unwrap();
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(object["run_data"].as_str().unwrap())
+            .unwrap();
+        let mut track_json = String::new();
+        flate2::read::GzDecoder::new(bytes.as_slice())
+            .read_to_string(&mut track_json)
+            .unwrap();
+        let obs_points: Value = serde_json::from_str(&track_json).unwrap();
+        assert_eq!(body_points, obs_points);
+        assert_eq!(
+            obs_points.as_array().unwrap().len(),
+            p.track.locations.len()
+        );
+        assert!(obs_points[0]["lat"].is_number() && obs_points[0]["lon"].is_number());
+        assert!(obs_points[0]["time"].is_number() && obs_points[0]["steps"].is_number());
         assert!(crate::track::wire::build_run_obs_object(
             &p.track,
             123,

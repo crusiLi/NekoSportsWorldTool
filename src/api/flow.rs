@@ -54,6 +54,7 @@ pub struct RunOutcome {
     pub detail_ok: bool,
     pub complete: Option<bool>,
     pub mode_matches: Option<bool>,
+    pub track_readback: Option<super::obs::TrackReadback>,
 }
 
 /// 本地 dry-run 的摘要；不会读取会话、访问网络或上传任何数据。
@@ -668,6 +669,7 @@ pub fn run_full_flow(
         detail_ok,
         complete,
         mode_matches,
+        track_readback: None,
     })
 }
 

@@ -145,6 +145,13 @@ pub fn run(
     )?;
     let keys = obs_keys(&sp.track, result.rrid, &result.uuid);
     let obs_ok = super::obs::upload_both_keys(client, &keys, &object.to_string().into_bytes(), log);
+    let track_readback = if obs_ok > 0 {
+        Some(super::obs::verify_uploaded_track(
+            client, &keys, &object, log,
+        ))
+    } else {
+        None
+    };
     std::thread::sleep(std::time::Duration::from_secs(2));
     let (mut complete, mut mode_matches) = (None, None);
     let detail_ok = match super::records::fetch_one_record(client, result.rrid) {
@@ -171,5 +178,6 @@ pub fn run(
         detail_ok,
         complete,
         mode_matches,
+        track_readback,
     })
 }
